@@ -45,12 +45,13 @@ The main difference in this codebase lies in the Transformer models:
 2. **Dependencies**:
    - **nanoGPT**: To generate the data folder with OpenWebText, see the [nanoGPT repository](https://github.com/karpathy/nanoGPT).
    - **FlashAttention**: FlashAttention from [Dao-AILab](https://github.com/Dao-AILab/flash-attention) (BSD 3-Clause License) is used, though PyTorch’s default attention can be substituted if preferred.
+   - We used [this](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-24-04.html) NVIDIA container image for PyTorch.
 
 ## **Getting Started**
 
 ### **Running the Code**
 
-To start the training process with defined hyperparameters, execute `launcher.sh`.
+To start the training process with defined hyperparameters, execute `launcher.sh`. 
 
 ### **Experiment Replication**
 
