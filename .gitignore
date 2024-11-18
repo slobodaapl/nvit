@@ -2,6 +2,7 @@
 .vscode/
 .idea/
 .pytest_cache/
+secrets.yaml
 *.pyc
 *.pyd
 *.pyo

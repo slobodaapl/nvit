@@ -55,7 +55,7 @@ system:
   use_amp: true
 
 wandb:
-  enabled: true
+  mode: "online"
   project: "phd"
   run_name: "nvit_"
   save_artifacts: true

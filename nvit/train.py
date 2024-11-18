@@ -88,8 +88,8 @@ class Trainer:
     def model(self) -> ViT:
         return self.get_module(self._model).module
     
-    def __init__(self, settings_path: str = "settings.yaml"):
-        self.settings = Dynaconf(settings_files=[settings_path])
+    def __init__(self, settings_path: str = "settings.yaml", secrets_path: str = "secrets.yaml"):
+        self.settings = Dynaconf(settings_files=[settings_path], secrets=secrets_path)
         self._model: ViT | DDP
         self.device: str
         self.optimizer: torch.optim.Optimizer
@@ -508,9 +508,12 @@ class Trainer:
     
     def setup_wandb(self) -> None:
         """Initialize wandb logging"""
-        if not self.master_process or not self.settings.wandb.enabled:
+        if not self.master_process or self.settings.wandb.mode not in ["online", "offline"]:
             return
-
+        
+        if self.settings.wandb.mode == "online":
+            wandb.login(key=self.settings.wandb.api_key)
+        
         wandb_config = {
             "model_config": asdict(self.model.config),
             "training": self.settings.training,
@@ -519,6 +522,7 @@ class Trainer:
         }
 
         wandb.init(
+            mode=self.settings.wandb.mode,
             project=self.settings.wandb.project,
             name=f"{self.settings.wandb.run_name}_{time.strftime('%Y%m%d_%H%M%S')}",
             config=wandb_config,
