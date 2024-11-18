@@ -37,7 +37,7 @@ import numpy as np
 from tqdm import tqdm
 from dynaconf import Dynaconf
 
-from vga_nvit.model import ViTConfig, ViT
+from nvit.model import ViTConfig, ViT
 
 
 @dataclass
