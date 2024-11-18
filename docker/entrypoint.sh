@@ -3,7 +3,7 @@
 set -xeuo pipefail
 
 # Install the mounted project in editable mode, for both development and running
-pip install -e .
+pip install --no-deps --root-user-action ignore -e .
 
 # Execute passed command
 exec "$@"

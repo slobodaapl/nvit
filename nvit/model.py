@@ -1,10 +1,10 @@
 import math
 import inspect
 from dataclasses import dataclass
+from typing import Tuple
 
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 from torch.nn.attention.flex_attention import flex_attention
 
 
@@ -34,8 +34,8 @@ class Block(nn.Module):
         self.value = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.att_c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         
-        self.c_fc    = nn.Linear(config.n_embd, 2 * 4 * config.n_embd, bias=config.bias)
-        self.silu    = nn.SiLU()
+        self.c_fc = nn.Linear(config.n_embd, 2 * 4 * config.n_embd, bias=config.bias)
+        self.silu = nn.SiLU()
         self.mlp_c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
 
         if (config.use_nViT == 0):
@@ -211,7 +211,7 @@ class ViT(nn.Module):
             torch.nn.init.zeros_(module.bias)
             torch.nn.init.ones_(module.weight)
 
-    def configure_optimizers(self, weight_decay: float, learning_rate: float, betas: tuple[float, float], device_type: str) -> torch.optim.AdamW:
+    def configure_optimizers(self, weight_decay: float, learning_rate: float, betas: Tuple[float, float], device_type: str) -> torch.optim.AdamW:
         # Start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # Filter out those that do not require grad
@@ -237,7 +237,7 @@ class ViT(nn.Module):
 
         return optimizer
 
-    def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> tuple[float, float]:
+    def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> Tuple[float, float]:
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
         # First estimate the number of flops we do per iteration.
         # See: https://github.com/pytorch/pytorch/issues/110656

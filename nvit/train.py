@@ -4,14 +4,13 @@ import sys
 import time
 import math
 import signal
-import psutil
 import logging
 from pathlib import Path
 from dataclasses import asdict
 from datetime import timedelta
 from dataclasses import dataclass
 from contextlib import nullcontext
-from typing import cast, Any, Optional
+from typing import cast, Any, Optional, Dict, Tuple
 
 import torchvision
 import torchvision.transforms as transforms
@@ -33,6 +32,7 @@ from torch.optim.lr_scheduler import (
 )
 
 import wandb
+import psutil
 import numpy as np
 from tqdm import tqdm
 from dynaconf import Dynaconf
@@ -54,7 +54,7 @@ class Trainer:
         return int(os.environ.get('RANK', -1)) != -1
     
     def __init__(self, settings_path: str = "settings.yaml"):
-        self.settings: Dynaconf
+        self.settings = Dynaconf(settings_files=[settings_path])
         self.model: ViT
         self.device: str
         self.optimizer: torch.optim.Optimizer
@@ -74,11 +74,9 @@ class Trainer:
         self.master_process: bool = True
         self.seed_offset: int = 0
         
-        self.setup_logging()
-        
-        self.settings = Dynaconf(settings_files=[settings_path])
-        self.setup_distributed()
         self.prep_folder()
+        self.setup_logging()
+        self.setup_distributed()
         self.setup_device_context()
         self.initialize_model()
         
@@ -126,7 +124,7 @@ class Trainer:
             except Exception as e:
                 self.logger.error(f"Error during DDP cleanup: {e}")
 
-    def validate_only(self) -> dict[str, float]:
+    def validate_only(self) -> Dict[str, float]:
         """Run validation only mode"""
         self.logger.info("Running in validation-only mode")
         self.train_loader, self.val_loader = self.get_data_loaders()
@@ -142,7 +140,7 @@ class Trainer:
         """Prepare output folder"""
         if self.master_process:
             if not os.path.exists(self.settings.data.out_dir):
-                os.makedirs(self.settings.data.out_dir)
+                os.makedirs(self.settings.data.out_dir, mode=0o777, exist_ok=True)
         
     def setup_distributed(self) -> None:
         """Initialize distributed training settings"""
@@ -177,7 +175,7 @@ class Trainer:
         }[self.settings.system.dtype]
         self.ctx = nullcontext() if device_type == 'cpu' else autocast(device_type=device_type, dtype=ptdtype)
 
-    def get_data_loaders(self) -> tuple[DataLoader, DataLoader]:
+    def get_data_loaders(self) -> Tuple[DataLoader, DataLoader]:
         """Initialize and return training and validation data loaders"""
         try:
             trainset = None
@@ -447,7 +445,7 @@ class Trainer:
             block.mlp_c_proj.weight.data.copy_(justnorm(block.mlp_c_proj.weight.data, 0))
 
     @torch.no_grad()
-    def estimate_loss(self) -> dict[str, float]:
+    def estimate_loss(self) -> Dict[str, float]:
         """Estimate loss on train and validation sets"""
         out = {}
         self.model.eval()
@@ -491,7 +489,7 @@ class Trainer:
             log_graph=True,
         )
 
-    def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
+    def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
         """Log metrics to wandb with proper grouping"""
         if not self.master_process or not self.settings.wandb.enabled:
             return
@@ -506,7 +504,7 @@ class Trainer:
         wandb.log(grouped_metrics, step=step)
 
     @torch.no_grad()
-    def compute_accuracy(self, logits: torch.Tensor, targets: torch.Tensor) -> tuple[float, float]:
+    def compute_accuracy(self, logits: torch.Tensor, targets: torch.Tensor) -> Tuple[float, float]:
         """
         Compute top-1 and top-5 accuracy
         """
@@ -523,7 +521,7 @@ class Trainer:
         return top1_acc, top5_acc
 
     @torch.no_grad()
-    def validate(self) -> dict[str, float]:
+    def validate(self) -> Dict[str, float]:
         """
         Full validation loop with detailed metrics
         """
@@ -556,7 +554,7 @@ class Trainer:
         self.model.train()
         return metrics
 
-    def save_checkpoint(self, iter_num: int, metrics: dict[str, float], rng_state_pytorch: torch.Tensor) -> None:
+    def save_checkpoint(self, iter_num: int, metrics: Dict[str, float], rng_state_pytorch: torch.Tensor) -> None:
         """Save model checkpoint with improved metadata and wandb artifact handling"""
         if not self.master_process:
             return
@@ -656,7 +654,7 @@ class Trainer:
         return (self.early_stopping_counter >= self.settings.training.early_stopping_patience 
                 if hasattr(self.settings.training, 'early_stopping_patience') else False)
 
-    def evaluate(self) -> dict[str, float]:
+    def evaluate(self) -> Dict[str, float]:
         """Periodic evaluation with improved metrics"""
         rng_state_pytorch = torch.get_rng_state()
         
@@ -714,7 +712,7 @@ class Trainer:
             total_norm += param_norm.item() ** 2
         return total_norm ** 0.5
     
-    def get_memory_usage(self) -> dict[str, float]:
+    def get_memory_usage(self) -> Dict[str, float]:
         if not self.settings.system.log_memory:
             return {}
         
@@ -938,7 +936,7 @@ class Trainer:
              
         return resstr
 
-    def write_statistics(self, iter_num: int, lr: float, losses: dict[str, float]) -> None:
+    def write_statistics(self, iter_num: int, lr: float, losses: Dict[str, float]) -> None:
         """Write training statistics to file"""
         stat_fname = Path(self.settings.data.out_dir) / "stat"
         with open(stat_fname, "a" if self.settings.training.init_from == 'resume' else "w") as f:
@@ -955,7 +953,7 @@ class Trainer:
         with open(finished_fname, "w") as f:
             f.write("1")
 
-    def get_transforms(self) -> tuple[transforms.Compose, transforms.Compose]:
+    def get_transforms(self) -> Tuple[transforms.Compose, transforms.Compose]:
         """Get dataset-specific transforms"""
         if self.settings.data.dataset.lower() == 'imagenet':
             train_transform = transforms.Compose([
@@ -1036,7 +1034,7 @@ class Trainer:
         else:
             self.scheduler = scheduler  # type: ignore
 
-    def log_gpu_stats(self) -> dict[str, float]:
+    def log_gpu_stats(self) -> Dict[str, float]:
         """Log multi-GPU training statistics"""
         if not torch.cuda.is_available() or not self.ddp or not self.settings.system.log_gpu_stats:
             return {}

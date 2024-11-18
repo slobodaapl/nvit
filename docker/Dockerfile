@@ -16,6 +16,8 @@ RUN apt-get update -y --no-install-recommends && \
 ENV PATH="/root/.local/bin:$PATH"
 RUN curl -sSL https://install.python-poetry.org | python3 -
 RUN poetry self add poetry-plugin-export
+RUN poetry config virtualenvs.create false
+
 
 WORKDIR /setup
 
