@@ -716,11 +716,11 @@ class Trainer:
         
         # Get detailed validation metrics
         val_metrics = self.validate()
-        train_loss = self.estimate_loss()['train']  # This returns 'train' key
+        train_loss = self.estimate_loss()['train']
         
         metrics = {
-            "train": train_loss,  # Changed from "train/loss" to "train"
-            "val": val_metrics['val/loss'],  # Changed to use just "val"
+            "train/loss": train_loss,  # Changed from "train" to "train/loss"
+            "val/loss": val_metrics['val/loss'],
             "val/top1_accuracy": val_metrics['val/top1_accuracy'],
             "val/top5_accuracy": val_metrics['val/top5_accuracy'],
             "optimizer/learning_rate": self.get_lr(self.iter_num) if self.settings.optimizer.decay_lr else self.settings.optimizer.learning_rate,
@@ -732,17 +732,12 @@ class Trainer:
             metrics["model/gradient_norm"] = self.compute_gradient_norm()
         metrics["model/parameter_norm"] = self.compute_parameter_norm()
         
-        # Log metrics to wandb with full paths
+        # Log metrics to wandb
         if self.master_process:
-            wandb_metrics = {
-                "train/loss": metrics["train"],
-                "val/loss": metrics["val"],
-                **{k: v for k, v in metrics.items() if k not in ["train", "val"]}
-            }
-            self.log_metrics(wandb_metrics)
+            self.log_metrics(metrics)
         
         # Check for early stopping
-        if self.should_stop_early(metrics['val']):
+        if self.should_stop_early(metrics['val/loss']):  # Updated key
             self.logger.info("Early stopping triggered!")
             self.mark_training_finished()
         
@@ -1002,8 +997,8 @@ class Trainer:
         """Write training statistics to file"""
         stat_fname = Path(self.settings.data.out_dir) / "stat"
         with open(stat_fname, "a" if self.settings.training.init_from == 'resume' else "w") as f:
-            # Use the simplified keys
-            resstr = f"{iter_num:.6e} {lr:.4e} {losses['train']:.4e} {losses['val']:.4e} "
+            # Use the consistent keys
+            resstr = f"{iter_num:.6e} {lr:.4e} {losses['train/loss']:.4e} {losses['val/loss']:.4e} "
             resstr += "0.0:.4e " * 9  # Placeholder values
             resstr += self.get_hparams_str() + "\n"
             f.write(resstr)
