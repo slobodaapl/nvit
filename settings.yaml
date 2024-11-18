@@ -29,11 +29,11 @@ optimizer:
     patience: 5
 
 model:
-  image_size: 224
-  patch_size: 16
-  n_layer: 12
-  n_head: 16
-  n_embd: 1024
+  image_size: 32
+  patch_size: 4
+  n_layer: 3
+  n_head: 4
+  n_embd: 128
   use_nViT: 0
   num_classes: 10
   dropout: 0.0
@@ -62,7 +62,7 @@ wandb:
   artifact_description: "ViT model checkpoint"
   artifact_loading:
     enabled: false
-    artifact_name: null
+    artifact_name: nvit_cifar10
 
 data:
   out_dir: "./out"
@@ -72,7 +72,7 @@ data:
   num_workers: 4
   augmentation:
     enabled: true
-    color_jitter: 0.4
+    color_jitter: 0.2
     random_affine: true
     cutout: false
-    auto_augment: false
+    auto_augment: true

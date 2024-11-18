@@ -45,6 +45,8 @@ The main components are:
 To start the training process with defined hyperparameters, execute `launcher.sh`.
 You can specify the number of GPUs to use as an argument: `./launcher.sh 8`
 
+If you are using Windows, you can use `docker_launcher.ps1` instead, in which case Dockerfile
+
 ### **Implementation Details**
 
 This implementation focuses on demonstrating how normalization can be applied to Vision Transformers. The code is designed to be clear and educational rather than optimized for production use.
