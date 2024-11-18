@@ -149,7 +149,7 @@ class Trainer:
 
     def cleanup(self) -> None:
         """Cleanup resources"""
-        if self.settings.wandb.enabled and wandb.run is not None:
+        if wandb.run is not None:
             wandb.finish()
             
         if self.ddp:
@@ -637,7 +637,7 @@ class Trainer:
             torch.save(checkpoint, best_path)
             
             # Save to wandb if enabled
-            if self.settings.wandb.enabled:
+            if wandb.run is not None:
                 # Create a wandb Artifact
                 artifact = wandb.Artifact(
                     name=f"model-{self.settings.wandb.run_name[:-1]}-{'nvit' if self.settings.model.use_nViT else 'vit'}",
