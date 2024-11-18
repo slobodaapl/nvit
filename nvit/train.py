@@ -5,6 +5,7 @@ import time
 import math
 import signal
 import logging
+import functools
 from pathlib import Path
 from dataclasses import asdict
 from datetime import timedelta
@@ -49,13 +50,40 @@ class Model:
 
 class Trainer:
     
-    @property
+    @functools.cached_property
     def ddp(self) -> bool:
         return int(os.environ.get('RANK', -1)) != -1
     
+    @classmethod
+    @functools.cache
+    def get_module(cls, model: ViT) -> Model:
+        """Get model components whether model is DDP or not"""
+        if isinstance(model, DDP):
+            transformer = model.module.transformer
+            config = model.module.config
+            module = model.module
+        else:
+            transformer = model.transformer
+            config = model.config
+            module = model
+        return Model(config, transformer, module)
+    
+    @property
+    def model(self) -> ViT:
+        ...
+    
+    @model.setter
+    def model(self, value: ViT) -> None:
+        self._model = value
+        self.get_module.cache_clear()
+        
+    @model.getter
+    def model(self) -> ViT:
+        return self.get_module(self._model).module
+    
     def __init__(self, settings_path: str = "settings.yaml"):
         self.settings = Dynaconf(settings_files=[settings_path])
-        self.model: ViT
+        self._model: ViT
         self.device: str
         self.optimizer: torch.optim.Optimizer
         self.train_loader: DataLoader
@@ -74,6 +102,11 @@ class Trainer:
         self.master_process: bool = True
         self.seed_offset: int = 0
         
+        # Setup signal handlers
+        if self.master_process:
+            signal.signal(signal.SIGINT, self.handle_signal)
+            signal.signal(signal.SIGTERM, self.handle_signal)
+        
         self.prep_folder()
         self.setup_logging()
         self.setup_distributed()
@@ -91,13 +124,8 @@ class Trainer:
         self.scaler: Optional[GradScaler] = None
         
         # Setup AMP scaler if using mixed precision
-        if self.settings.system.dtype in ['float16', 'bfloat16']:
+        if self.settings.system.use_amp and self.settings.system.dtype in ['float16', 'bfloat16']:
             self.scaler = GradScaler()
-        
-        # Setup signal handlers
-        if self.master_process:
-            signal.signal(signal.SIGINT, self.handle_signal)
-            signal.signal(signal.SIGTERM, self.handle_signal)
     
     def setup_logging(self) -> None:
         """Setup logging configuration"""
@@ -173,7 +201,11 @@ class Trainer:
             'bfloat16': torch.bfloat16,
             'float16': torch.float16
         }[self.settings.system.dtype]
-        self.ctx = nullcontext() if device_type == 'cpu' else autocast(device_type=device_type, dtype=ptdtype)
+        
+        self.ctx = (
+            nullcontext() if device_type == 'cpu' or not self.settings.system.use_amp 
+            else autocast(device_type=device_type, dtype=ptdtype)
+        )
 
     def get_data_loaders(self) -> Tuple[DataLoader, DataLoader]:
         """Initialize and return training and validation data loaders"""
@@ -398,26 +430,13 @@ class Trainer:
         else:
             raise ValueError(f"Invalid init_from value: {self.settings.training.init_from}")
         
+        self.model.to(self.device)
+        
         if self.ddp:
             self.model = cast(ViT, DDP(self.model, device_ids=[self.ddp_local_rank]))
 
-        self.model.to(self.device)
-        
         if self.settings.system.compile:
             self.model = cast(ViT, torch.compile(self.model))
-
-    @staticmethod
-    def get_module(model: ViT) -> Model:
-        """Get model components whether model is DDP or not"""
-        if isinstance(model, DDP):
-            transformer = model.module.transformer
-            config = model.module.config
-            module = model.module
-        else:
-            transformer = model.transformer
-            config = model.config
-            module = model
-        return Model(config, transformer, module)
 
     def normalize_matrices(self) -> None:
         """Normalize model matrices if using nViT"""
@@ -752,11 +771,11 @@ class Trainer:
             if self.master_process:
                 print(f"learning_rate: {self.settings.optimizer.learning_rate}")
                 print(f"min_lr: {self.settings.optimizer.min_lr}")
-                print(f"max_iters: {self.settings.optimizer.max_iters}")
+                print(f"max_iters: {self.settings.training.max_iters}")
                 print(f"lr_decay_iters: {self.settings.optimizer.lr_decay_iters}")
                 print(f"warmup_iters: {self.settings.optimizer.warmup_iters}")
                 print(f"batch_size: {self.settings.training.batch_size}")
-                print(f"gradient_accumulation_steps: {self.settings.optimizer.gradient_accumulation_steps}")
+                print(f"gradient_accumulation_steps: {self.settings.training.gradient_accumulation_steps}")
                 print(f"weight_decay: {self.settings.optimizer.weight_decay}")
 
             # Initialize stats file if starting from scratch
@@ -767,7 +786,7 @@ class Trainer:
                     resstr = resstr + self.get_hparams_str() + "\n"
                     f.write(resstr)
             
-            if self.iter_num == 0 and self.settings.eval_only:
+            if self.iter_num == 0 and self.settings.training.eval_only:
                 self.evaluate()
 
             # Calculate total epochs based on max_iters and dataset size
@@ -1082,8 +1101,12 @@ class Trainer:
         self.save_checkpoint(self.iter_num, {"train/loss": 0.0}, torch.get_rng_state())
         sys.exit(0)
 
-    def get_validation_subset(self, num_samples: int = 1000) -> DataLoader:
+    def get_validation_subset(self, num_samples: Optional[int] = None) -> DataLoader:
         """Create a subset of validation data for quick evaluation"""
+        if not self.settings.system.quick_validation:
+            return self.val_loader
+        
+        num_samples = num_samples or self.settings.system.quick_validation_size
         if len(self.val_loader.dataset) <= num_samples:  # type: ignore
             return self.val_loader
         
@@ -1100,7 +1123,7 @@ class Trainer:
 
 def main():
     trainer = Trainer()
-    if trainer.settings.eval_only:
+    if trainer.settings.training.eval_only:
         trainer.validate_only()
     else:
         trainer.train()

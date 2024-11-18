@@ -5,19 +5,19 @@ training:
   eval_only: false
   always_save_checkpoint: true
   init_from: "scratch"
-  gradient_accumulation_steps: 64
+  gradient_accumulation_steps: 16
   batch_size: 8
-  max_iters: 600000
-  time_limit_seconds: 1000000000
-  max_iters_per_launch: 1000000000
+  max_iters: 20000
+  time_limit_seconds: 86400
+  max_iters_per_launch: 20000
   early_stopping_patience: 10
   save_numbered_checkpoints: false
 
 optimizer:
   learning_rate: 0.0015
   min_lr: 1e-5
-  warmup_iters: 2000
-  lr_decay_iters: 600000
+  warmup_iters: 100
+  lr_decay_iters: 2000
   decay_lr: true
   weight_decay: 0.1
   beta1: 0.9
