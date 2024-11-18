@@ -22,6 +22,7 @@ from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 from torch.utils.data import DataLoader, Subset
 from torch.nn import ModuleDict, functional as F
+from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR, 
@@ -297,21 +298,41 @@ class Trainer:
             if trainset is None or valset is None:
                 raise ValueError(f"Dataset {self.settings.data.dataset} not properly initialized")
 
-            # Create data loaders
+            # Create samplers for distributed training
+            train_sampler = DistributedSampler(
+                trainset,
+                num_replicas=self.ddp_world_size if self.ddp else 1,
+                rank=self.ddp_rank if self.ddp else 0,
+                shuffle=True,
+                seed=self.settings.training.seed if hasattr(self.settings.training, 'seed') else 42
+            ) if self.ddp else None
+
+            val_sampler = DistributedSampler(
+                valset,
+                num_replicas=self.ddp_world_size if self.ddp else 1,
+                rank=self.ddp_rank if self.ddp else 0,
+                shuffle=False
+            ) if self.ddp else None
+
+            # Create data loaders with appropriate samplers
             train_loader = DataLoader(
                 trainset, 
                 batch_size=self.settings.training.batch_size,
-                shuffle=True, 
+                shuffle=(train_sampler is None),  # Don't shuffle if using sampler
+                sampler=train_sampler,
                 num_workers=self.settings.data.num_workers,
-                pin_memory=True if self.settings.system.device == 'cuda' else False
+                pin_memory=True if self.settings.system.device == 'cuda' else False,
+                drop_last=True  # Recommended for DDP to avoid uneven batch sizes
             )
             
             val_loader = DataLoader(
                 valset, 
                 batch_size=self.settings.training.batch_size,
-                shuffle=False, 
+                shuffle=False,  # Don't shuffle validation
+                sampler=val_sampler,
                 num_workers=self.settings.data.num_workers,
-                pin_memory=True if self.settings.system.device == 'cuda' else False
+                pin_memory=True if self.settings.system.device == 'cuda' else False,
+                drop_last=False
             )
             
             return train_loader, val_loader
@@ -751,10 +772,17 @@ class Trainer:
             if self.iter_num == 0 and self.settings.eval_only:
                 self.evaluate()
 
+            # Calculate total epochs based on max_iters and dataset size
+            current_epoch = math.floor(self.iter_num / len(self.train_loader))
+
             while (local_iter_num < self.settings.training.max_iters_per_launch
                    and self.iter_num < self.settings.training.max_iters
                    and time.time() - tlaunch < self.settings.training.time_limit_seconds
                    and not self.finished):
+                
+                # Set epoch for distributed sampler
+                if self.ddp:
+                    self.train_loader.sampler.set_epoch(current_epoch)  # type: ignore
                 
                 # Set random seed for reproducibility
                 local_seed = 100 * self.iter_num + self.seed_offset
@@ -859,6 +887,8 @@ class Trainer:
                     
                     if self.iter_num >= self.settings.training.max_iters:
                         self.mark_training_finished()
+
+                current_epoch += 1
 
             if self.ddp:
                 dist.barrier()

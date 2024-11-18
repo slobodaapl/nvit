@@ -1,0 +1,78 @@
+training:
+  eval_interval: 1000
+  log_interval: 10
+  eval_iters: 200
+  eval_only: false
+  always_save_checkpoint: true
+  init_from: "scratch"
+  gradient_accumulation_steps: 64
+  batch_size: 8
+  max_iters: 600000
+  time_limit_seconds: 1000000000
+  max_iters_per_launch: 1000000000
+  early_stopping_patience: 10
+  save_numbered_checkpoints: false
+
+optimizer:
+  learning_rate: 0.0015
+  min_lr: 1e-5
+  warmup_iters: 2000
+  lr_decay_iters: 600000
+  decay_lr: true
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  scheduler:
+    type: "cosine"
+    factor: 0.1
+    patience: 5
+
+model:
+  image_size: 224
+  patch_size: 16
+  n_layer: 12
+  n_head: 16
+  n_embd: 1024
+  use_nViT: 0
+  num_classes: 10
+  dropout: 0.0
+  bias: false
+
+system:
+  device: "cuda"
+  dtype: "bfloat16"
+  compile: true
+  backend: "nccl"
+  log_level: "INFO"
+  log_to_file: true
+  memory_threshold: 0.9
+  log_memory: true
+  log_gpu_stats: true
+  clear_cache: true
+  quick_validation: true
+  quick_validation_size: 1000
+  use_amp: true
+
+wandb:
+  enabled: false
+  project: "phd"
+  run_name: "nvit_"
+  save_artifacts: true
+  artifact_description: "ViT model checkpoint"
+  artifact_loading:
+    enabled: false
+    artifact_name: null
+
+data:
+  out_dir: "./out"
+  dataset: "cifar10"
+  checkpoint_dir: "./out"
+  checkpoint_file: 'checkpoint_latest.pt'
+  num_workers: 4
+  augmentation:
+    enabled: true
+    color_jitter: 0.4
+    random_affine: true
+    cutout: false
+    auto_augment: false

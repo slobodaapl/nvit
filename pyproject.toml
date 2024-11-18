@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "vga-nvit"
+version = "0.1.0"
+description = ""
+authors = ["slobodaapl <slobodaapl@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+torch = { version = "2.*", source = "pytorch-gpu" }
+torchvision = { version = "0.*", source = "pytorch-gpu" }
+tqdm = "4.*"
+pydantic = "2.*"
+dynaconf = "3.*"
+wandb = "0.*"
+
+[[tool.poetry.source]]
+name = "pytorch-gpu"
+url = "https://download.pytorch.org/whl/cu124"
+priority = "explicit"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
