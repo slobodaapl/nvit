@@ -437,7 +437,7 @@ class Trainer:
             ckpt_path = Path(self.settings.data.checkpoint_dir) / self.settings.data.checkpoint_file
             self.load_checkpoint(ckpt_path)
         elif self.settings.training.init_from == 'wandb':
-            self.load_from_wandb(self.settings.wandb.resume_artifact)
+            self.load_from_wandb(self.settings.wandb.artifact_name)
         else:
             raise ValueError(f"Invalid init_from value: {self.settings.training.init_from}")
         
@@ -603,7 +603,7 @@ class Trainer:
             return
         
         tcheckpointsaving_begin = time.time()
-        raw_model = self.model.module if self.ddp else self.model
+        raw_model = self.get_module(self.model).module
         
         checkpoint = {
             'model': raw_model.state_dict(),

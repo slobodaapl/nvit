@@ -55,14 +55,12 @@ system:
   use_amp: true
 
 wandb:
-  enabled: false
+  enabled: true
   project: "phd"
   run_name: "nvit_"
   save_artifacts: true
   artifact_description: "ViT model checkpoint"
-  artifact_loading:
-    enabled: false
-    artifact_name: nvit_cifar10
+  artifact_name: "nvit_cifar10"
 
 data:
   out_dir: "./out"
