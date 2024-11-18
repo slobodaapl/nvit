@@ -11,7 +11,8 @@ from dataclasses import asdict
 from datetime import timedelta
 from dataclasses import dataclass
 from contextlib import nullcontext
-from typing import cast, Any, Optional, Dict, Tuple
+from collections import OrderedDict
+from typing import Union, cast, Any, Optional, Dict, Tuple
 
 import torchvision
 import torchvision.transforms as transforms
@@ -46,6 +47,12 @@ class Model:
     config: ViTConfig
     transformer: ModuleDict
     module: ViT
+
+
+class MockDPPModel(ViT):
+    @classmethod
+    def no_sync(cls) -> nullcontext:
+        return nullcontext()
 
 
 class Trainer:
@@ -83,7 +90,7 @@ class Trainer:
     
     def __init__(self, settings_path: str = "settings.yaml"):
         self.settings = Dynaconf(settings_files=[settings_path])
-        self._model: ViT
+        self._model: ViT | DDP
         self.device: str
         self.optimizer: torch.optim.Optimizer
         self.train_loader: DataLoader
@@ -177,14 +184,18 @@ class Trainer:
             self.seed_offset = 0
             self.ddp_world_size = 1
             return
-
-        dist.init_process_group(
-            backend=self.settings.system.backend,
-            timeout=timedelta(milliseconds=20*60000)
-        )
+        
         self.ddp_rank = int(os.environ['RANK'])
         self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
         self.ddp_world_size = int(os.environ['WORLD_SIZE'])
+
+        dist.init_process_group(
+            backend=self.settings.system.backend,
+            world_size=self.ddp_world_size,
+            rank=self.ddp_rank,
+            device_id=torch.device(f'cuda:{self.ddp_local_rank}')
+        )
+        
         self.device = f'cuda:{self.ddp_local_rank}'
         torch.cuda.set_device(self.device)
         self.master_process = self.ddp_rank == 0
@@ -432,11 +443,24 @@ class Trainer:
         
         self.model.to(self.device)
         
+        # First wrap with DDP if using distributed training
         if self.ddp:
-            self.model = cast(ViT, DDP(self.model, device_ids=[self.ddp_local_rank]))
-
+            self.logger.info(f"DDP: {self.ddp}, wrapping the model")
+            self.model = cast(ViT, DDP(
+                self.model, 
+                device_ids=[self.ddp_local_rank],
+                static_graph=False  # Required for torch.compile compatibility
+            ))
+            
+        # Then compile if enabled
         if self.settings.system.compile:
+            self.logger.info("Compiling model with torch.compile()")
             self.model = cast(ViT, torch.compile(self.model))
+
+        # Verify model wrapping
+        if self.ddp:
+            assert isinstance(self.model, (DDP, torch._dynamo.eval_frame.OptimizedModule)), \
+                f"Model should be DDP or compiled DDP, but got {type(self.model)}"
 
     def normalize_matrices(self) -> None:
         """Normalize model matrices if using nViT"""
@@ -643,7 +667,7 @@ class Trainer:
                         )
                         artifact.delete()
                     except Exception as e:
-                        print(f"Failed to delete old artifact: {e}")
+                        self.logger.info(f"Failed to delete old artifact: {e}")
                 
                 # Store new version number
                 self.last_artifact_version = artifact.version
@@ -653,7 +677,7 @@ class Trainer:
             numbered_path = Path(self.settings.data.out_dir) / f'checkpoint_{iter_num:06d}.pt'
             torch.save(checkpoint, numbered_path)
 
-        print(f"Checkpoint saving time: {time.time()-tcheckpointsaving_begin:.2f} sec")
+        self.logger.info(f"Checkpoint saving time: {time.time()-tcheckpointsaving_begin:.2f} sec")
 
     def should_stop_early(self, val_loss: float) -> bool:
         """Check if training should stop early"""
@@ -679,11 +703,13 @@ class Trainer:
         
         # Get detailed validation metrics
         val_metrics = self.validate()
-        train_loss = self.estimate_loss()['train']
+        train_loss = self.estimate_loss()['train']  # This returns 'train' key
         
         metrics = {
-            "train/loss": train_loss,
-            **val_metrics,
+            "train": train_loss,  # Changed from "train/loss" to "train"
+            "val": val_metrics['val/loss'],  # Changed to use just "val"
+            "val/top1_accuracy": val_metrics['val/top1_accuracy'],
+            "val/top5_accuracy": val_metrics['val/top5_accuracy'],
             "optimizer/learning_rate": self.get_lr(self.iter_num) if self.settings.optimizer.decay_lr else self.settings.optimizer.learning_rate,
             "training/global_step": self.iter_num,
         }
@@ -693,19 +719,18 @@ class Trainer:
             metrics["model/gradient_norm"] = self.compute_gradient_norm()
         metrics["model/parameter_norm"] = self.compute_parameter_norm()
         
-        # Log metrics
+        # Log metrics to wandb with full paths
         if self.master_process:
-            print(f"Step {self.iter_num}:")
-            print(f"\tTrain loss: {metrics['train/loss']:.6f}")
-            print(f"\tVal loss: {metrics['val/loss']:.6f}")
-            print(f"\tVal top1 acc: {metrics['val/top1_accuracy']:.2f}%")
-            print(f"\tVal top5 acc: {metrics['val/top5_accuracy']:.2f}%")
-            
-            self.log_metrics(metrics)
+            wandb_metrics = {
+                "train/loss": metrics["train"],
+                "val/loss": metrics["val"],
+                **{k: v for k, v in metrics.items() if k not in ["train", "val"]}
+            }
+            self.log_metrics(wandb_metrics)
         
         # Check for early stopping
-        if self.should_stop_early(metrics['val/loss']):
-            print("Early stopping triggered!")
+        if self.should_stop_early(metrics['val']):
+            self.logger.info("Early stopping triggered!")
             self.mark_training_finished()
         
         # Save checkpoint
@@ -763,21 +788,17 @@ class Trainer:
                        initial=self.iter_num,
                        desc="Training",
                        disable=not self.master_process)
+            
+            postfix: Dict[str, Union[str, float, int]] = OrderedDict({
+                "loss": "+inf", 
+                "lr": f"{self.settings.optimizer.learning_rate:.4e}", 
+                "time_ms": "0.000"
+            })
 
             # Initialize training state
             local_iter_num = 0
             t0 = time.time()
-
-            if self.master_process:
-                print(f"learning_rate: {self.settings.optimizer.learning_rate}")
-                print(f"min_lr: {self.settings.optimizer.min_lr}")
-                print(f"max_iters: {self.settings.training.max_iters}")
-                print(f"lr_decay_iters: {self.settings.optimizer.lr_decay_iters}")
-                print(f"warmup_iters: {self.settings.optimizer.warmup_iters}")
-                print(f"batch_size: {self.settings.training.batch_size}")
-                print(f"gradient_accumulation_steps: {self.settings.training.gradient_accumulation_steps}")
-                print(f"weight_decay: {self.settings.optimizer.weight_decay}")
-
+            
             # Initialize stats file if starting from scratch
             if self.master_process and self.settings.training.init_from == 'scratch':
                 stat_fname = Path(self.settings.data.out_dir) / "stat"
@@ -827,15 +848,16 @@ class Trainer:
                         X, y = X.to(self.device), y.to(self.device)
 
                     loss = torch.tensor(torch.inf, device=self.device)
-                    for micro_step in range(self.settings.optimizer.gradient_accumulation_steps):
-                        context = (nullcontext() if not self.ddp or 
-                                  micro_step >= self.settings.optimizer.gradient_accumulation_steps - 1 
-                                  else self.model.no_sync())
+                    for micro_step in range(self.settings.training.gradient_accumulation_steps):
+                        if isinstance(self._model, DDP) and micro_step < self.settings.training.gradient_accumulation_steps - 1:
+                            context = self._model.no_sync()
+                        else:
+                            context = nullcontext()
                         
                         with context, self.ctx:
                             logits = self.model(X)
                             loss = F.cross_entropy(logits, y)
-                            loss = loss / self.settings.optimizer.gradient_accumulation_steps
+                            loss = loss / self.settings.training.gradient_accumulation_steps
 
                         if self.scaler is not None:
                             self.scaler.scale(loss).backward()
@@ -863,6 +885,8 @@ class Trainer:
                     t1 = time.time()
                     dt = t1 - t0
                     t0 = t1
+                    
+                    metrics = None
 
                     if self.iter_num % self.settings.training.log_interval == 0 and self.master_process:
                         memory_stats = self.get_memory_usage()
@@ -876,11 +900,11 @@ class Trainer:
                             gc.collect()
                             torch.cuda.empty_cache()
 
-                        lossf = loss.item() * self.settings.optimizer.gradient_accumulation_steps
-                        print(f"iter {self.iter_num}: loss {lossf:.6f}, time {dt*1000:.2f}ms")
+                        lossf = loss.item() * self.settings.training.gradient_accumulation_steps
                         
                         # Log training metrics
                         metrics = {
+                            "train/iter": self.iter_num,
                             "train/batch_loss": lossf,
                             "train/batch_time_ms": dt * 1000,
                             "optimizer/learning_rate": lr,
@@ -893,14 +917,20 @@ class Trainer:
                     if self.settings.model.use_nViT:
                         self.normalize_matrices()
 
-                    if self.iter_num % 100 == 0 and self.master_process:
-                        print(f"lr={lr}")
-
                     self.iter_num += 1
                     local_iter_num += 1
                     
                     if self.master_process:
                         pbar.update(1)
+                        postfix.update({"epoch": current_epoch})
+                        if metrics:
+                            postfix.update(**{
+                                "loss": f"{metrics['train/batch_loss']:.4f}", 
+                                "lr": f"{metrics['optimizer/learning_rate']:.4e}", 
+                                "time_ms": f"{dt*1000:.1f}"
+                            })
+                            metrics = None
+                        pbar.set_postfix(ordered_dict=postfix)
                     
                     if self.iter_num >= self.settings.training.max_iters:
                         self.mark_training_finished()
@@ -959,6 +989,7 @@ class Trainer:
         """Write training statistics to file"""
         stat_fname = Path(self.settings.data.out_dir) / "stat"
         with open(stat_fname, "a" if self.settings.training.init_from == 'resume' else "w") as f:
+            # Use the simplified keys
             resstr = f"{iter_num:.6e} {lr:.4e} {losses['train']:.4e} {losses['val']:.4e} "
             resstr += "0.0:.4e " * 9  # Placeholder values
             resstr += self.get_hparams_str() + "\n"

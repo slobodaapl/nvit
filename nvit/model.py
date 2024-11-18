@@ -1,10 +1,11 @@
 import math
 import inspect
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, cast
 
 import torch
 import torch.nn as nn
+from einops import rearrange
 from torch.nn.attention.flex_attention import flex_attention
 
 
@@ -66,33 +67,39 @@ class Block(nn.Module):
         return res
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        B, T, C = h.size()
+        B, T, C = h.size()  # batch, sequence_length, embedding_dim
 
         if (self.config.use_nViT == 0):
             h = self.rmsnorm_att(h)
         
-        q = self.query(h)
-        k = self.key(h)
-        v = self.value(h)
+        # Project to q, k, v
+        q = self.query(h)  # [B, T, C]
+        k = self.key(h)    # [B, T, C]
+        v = self.value(h)  # [B, T, C]
 
-        q = q.view(B, T, self.config.n_head, self.config.n_embd // self.config.n_head) 
-        k = k.view(B, T, self.config.n_head, self.config.n_embd // self.config.n_head)
-        v = v.view(B, T, self.config.n_head, self.config.n_embd // self.config.n_head)
+        # Split embedding dim into heads: [B, T, C] -> [B, H, T, D]
+        q = rearrange(q, 'b t (h d) -> b h t d', h=self.config.n_head)
+        k = rearrange(k, 'b t (h d) -> b h t d', h=self.config.n_head)
+        v = rearrange(v, 'b t (h d) -> b h t d', h=self.config.n_head)
 
         if (self.config.use_nViT == 1):
-            sqk = (self.sqk * (self.sqk_init_value/self.sqk_init_scaling)).view(1, 1, self.config.n_head, self.config.n_embd // self.config.n_head)
+            sqk = (self.sqk * (self.sqk_init_value/self.sqk_init_scaling))
+            sqk = rearrange(sqk, '(h d) -> 1 h 1 d', h=self.config.n_head)
             q = sqk * self.justnorm(q)  
             k = sqk * self.justnorm(k)  
 
-        sqrt_head_dim = (self.config.n_embd / self.config.n_head) ** 0.5
+        head_size = C // self.config.n_head
+        sqrt_head_dim = head_size ** 0.5
         softmax_scale = 1.0 / sqrt_head_dim if self.config.use_nViT == 0 else sqrt_head_dim
         
-        # Use flex_attention
-        y = flex_attention(q, k, v, scale=softmax_scale)
+        # Get attention output [B, H, T, D]
+        attn_output = cast(torch.Tensor,flex_attention(q, k, v, scale=softmax_scale))
         
-        y = y[0].contiguous().view(B, T, self.config.n_embd)
-
-        h_att = self.att_c_proj(y)
+        # Merge heads back: [B, H, T, D] -> [B, T, C]
+        h_att = rearrange(attn_output, 'b h t d -> b t (h d)')
+        
+        # Project attention output
+        h_att = self.att_c_proj(h_att)
 
         if (self.config.use_nViT == 0):
             h = h + h_att
@@ -100,20 +107,21 @@ class Block(nn.Module):
             lr = self.attn_alpha * (self.attn_alpha_init_value / self.attn_alpha_init_scaling)
             lr = torch.abs(lr)
             
-            A_norm = self.justnorm(h) # normally, normalization is not needed
+            A_norm = self.justnorm(h)
             B_norm = self.justnorm(h_att)
                 
-            #res = (1.0 - lr) * A_norm + lr * B_norm
             res = A_norm + lr * (B_norm - A_norm)
             h = self.justnorm(res)
 
-    
+        # MLP block
         if (self.config.use_nViT == 0):
             h = self.rmsnorm_mlp(h)
+        
         uv = self.c_fc(h)
         if (self.config.use_nViT == 1):
             suv = (self.suv * ((self.suv_init_value/self.suv_init_scaling) * (self.config.n_embd ** 0.5))) 
             uv = suv * uv  
+        
         u, v = torch.chunk(uv, 2, dim=-1)
         x_mlp = u * self.silu(v)
         h_mlp = self.mlp_c_proj(x_mlp)
@@ -124,10 +132,9 @@ class Block(nn.Module):
             lr = self.mlp_alpha * (self.mlp_alpha_init_value / self.mlp_alpha_init_scaling)
             lr = torch.abs(lr)
 
-            A_norm = self.justnorm(h) # normally, normalization is not needed
+            A_norm = self.justnorm(h)
             B_norm = self.justnorm(h_mlp)
                 
-            #res = (1.0 - lr) * A_norm + lr * B_norm
             res = A_norm + lr * (B_norm - A_norm)
             h = self.justnorm(res)
 

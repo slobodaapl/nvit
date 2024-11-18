@@ -7,9 +7,9 @@ training:
   init_from: "scratch"
   gradient_accumulation_steps: 16
   batch_size: 8
-  max_iters: 20000
+  max_iters: 100000
   time_limit_seconds: 86400
-  max_iters_per_launch: 20000
+  max_iters_per_launch: 100000
   early_stopping_patience: 10
   save_numbered_checkpoints: false
 
