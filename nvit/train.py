@@ -89,7 +89,7 @@ class Trainer:
         return self.get_module(self._model).module
     
     def __init__(self, settings_path: str = "settings.yaml", secrets_path: str = "secrets.yaml"):
-        self.settings = Dynaconf(settings_files=[settings_path], secrets=secrets_path)
+        self.settings = Dynaconf(settings_files=[settings_path], secrets=secrets_path, envvar_prefix="NVIT")
         self._model: ViT | DDP
         self.device: str
         self.optimizer: torch.optim.Optimizer
@@ -384,8 +384,8 @@ class Trainer:
     
     def load_from_wandb(self, artifact_name: str) -> None:
         """Load model from wandb artifact"""
-        if not self.settings.wandb.enabled:
-            raise ValueError("Wandb must be enabled to load from artifacts")
+        if self.settings.wandb.mode != "online":
+            raise ValueError("Wandb must be enabled and online to load from artifacts")
         
         api = wandb.Api()
         artifact = api.artifact(artifact_name, type='model')
@@ -512,7 +512,7 @@ class Trainer:
             return
         
         if self.settings.wandb.mode == "online":
-            wandb.login(key=self.settings.wandb.api_key)
+            wandb.login(key=self.settings.wandb_api_key)  # loaded from secrets.yaml or environment variable NVIT_WANDB_API_KEY
         
         wandb_config = {
             "model_config": asdict(self.model.config),
@@ -528,17 +528,26 @@ class Trainer:
             config=wandb_config,
         )
         
-        # Watch model for gradient and parameter tracking
-        wandb.watch(
-            self.model,
-            log="all",  # Log gradients and parameters
-            log_freq=self.settings.training.log_interval,
-            log_graph=True,
-        )
+        # Only watch the model if not using DDP or torch.compile
+        if not self.ddp and not self.settings.system.compile:
+            wandb.watch(
+                self.model,
+                log="all",
+                log_freq=self.settings.training.log_interval,
+                log_graph=True,
+            )
+        else:
+            # For DDP/compiled models, watch with reduced monitoring
+            wandb.watch(
+                self.model,
+                log="parameters",  # Only log parameters, not gradients
+                log_freq=self.settings.training.log_interval,
+                log_graph=False,  # Disable graph logging
+            )
 
     def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
         """Log metrics to wandb with proper grouping"""
-        if not self.master_process or not self.settings.wandb.enabled:
+        if not self.master_process or wandb.run is None:
             return
 
         # Group metrics by prefix (e.g., 'train/', 'val/', 'optimizer/')
@@ -916,7 +925,7 @@ class Trainer:
                             **gpu_metrics
                         }
                         
-                        self.log_metrics(metrics, step=self.iter_num)
+                        self.log_metrics(metrics)
 
                     if self.settings.model.use_nViT:
                         self.normalize_matrices()
