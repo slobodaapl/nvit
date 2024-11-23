@@ -65,7 +65,7 @@ class Trainer:
     @functools.cache
     def get_module(cls, model: ViT) -> Model:
         """Get model components whether model is DDP or not"""
-        if isinstance(model, DDP):
+        if cls.ddp:
             transformer = model.module.transformer
             config = model.module.config
             module = model.module
@@ -835,21 +835,6 @@ class Trainer:
             # Initialize wandb only on master process
             if self.master_process:
                 self.setup_wandb()
-            
-            # Ensure model is properly wrapped with DDP
-            if self.ddp:
-                self.logger.info(f"Model type before DDP wrap: {type(self.model)}")
-                if not isinstance(self.model, DDP):
-                    self.model = cast(ViT, DDP(
-                        self.model,
-                        device_ids=[self.ddp_local_rank],
-                        output_device=self.ddp_local_rank,
-                        static_graph=False,
-                        broadcast_buffers=False,
-                        find_unused_parameters=False
-                    ))
-                    self.model = cast(ViT, torch.compile(self.model))
-                self.logger.info(f"Model type after DDP wrap: {type(self.model)}")
             
             # Add synchronization point before training
             if self.ddp:
