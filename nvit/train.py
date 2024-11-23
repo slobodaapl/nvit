@@ -61,11 +61,10 @@ class Trainer:
     def ddp(self) -> bool:
         return int(os.environ.get('RANK', -1)) != -1
     
-    @classmethod
     @functools.cache
-    def get_module(cls, model: ViT) -> Model:
+    def get_module(self, model: ViT) -> Model:
         """Get model components whether model is DDP or not"""
-        if cls.ddp:
+        if self.ddp and self.ddp_initialized:
             transformer = model.module.transformer
             config = model.module.config
             module = model.module
@@ -108,6 +107,7 @@ class Trainer:
         self.ddp_rank: Optional[int] = None
         self.ddp_local_rank: Optional[int] = None
         self.ddp_world_size: Optional[int] = None
+        self.ddp_initialized: bool = False
         
         self.iter_num: int = 0
         self.finished: bool = False
@@ -491,6 +491,7 @@ class Trainer:
                 broadcast_buffers=False,
                 find_unused_parameters=False
             ))
+            self.ddp_initialized = True
             
         # Then compile if enabled
         if self.settings.system.compile:
