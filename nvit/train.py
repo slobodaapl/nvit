@@ -205,8 +205,7 @@ class Trainer:
             self.master_process = True
             self.seed_offset = 0
             self.ddp_world_size = 1
-            self.device = 'cuda'
-            torch.cuda.set_device(self.device)
+            self.device = self.settings.system.device
             return
         
         try:
