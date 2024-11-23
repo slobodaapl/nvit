@@ -2,7 +2,6 @@
 
 # Default values
 num_gpus=1
-wandb_token=""
 
 # Load environment variables from .env file if it exists
 if [ -f .env ]; then
@@ -16,10 +15,6 @@ while [[ $# -gt 0 ]]; do
             num_gpus="$2"
             shift 2
             ;;
-        --wandb_token)
-            wandb_token="$2"
-            shift 2
-            ;;
         *)
             echo "Unknown argument: $1"
             exit 1
@@ -27,12 +22,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Get current user's UID and GID
+USER_ID=$(id -u)
+GROUP_ID=$(id -g)
+
 # Run docker container with local directory mounted and execute training command
 docker run --rm \
     --gpus all \
     -v $(pwd):/app \
     -w /app \
-    -e WANDB_API_KEY=$wandb_token \
     --env-file .env \
+    --user ${USER_ID}:${GROUP_ID} \
     nvit:latest \
     torchrun --nnodes 1 --nproc_per_node $num_gpus --rdzv_endpoint=localhost:29501 nvit/train.py

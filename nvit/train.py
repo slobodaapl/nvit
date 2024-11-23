@@ -530,6 +530,7 @@ class Trainer:
             return
         
         if self.settings.wandb.mode == "online":
+            print(f"Logging to wandb with key: {self.settings.get('wandb_api_key', os.getenv('WANDB_API_KEY'))[:5]}...")
             wandb.login(key=self.settings.get('wandb_api_key', os.getenv('WANDB_API_KEY')))  # loaded from secrets.yaml or environment variable NVIT_WANDB_API_KEY, or WANDB_API_KEY
         
         wandb_config = {

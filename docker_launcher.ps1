@@ -1,7 +1,6 @@
 # Default values
 param(
-    [int]$num_gpus = 1,
-    [string]$wandb_token = ""
+    [int]$num_gpus = 1
 )
 
 # Load environment variables from .env file if it exists
@@ -13,12 +12,16 @@ if (Test-Path .env) {
     }
 }
 
+# Get current user's UID and GID
+$USER_ID = (Get-WmiObject -Class Win32_UserAccount -Filter "Name = '$env:USERNAME'").SID
+$GROUP_ID = (Get-WmiObject -Class Win32_Group -Filter "Name = 'Users'").SID
+
 # Run docker container with local directory mounted and execute training command
 docker run --rm `
     --gpus all `
     -v ${PWD}:/app `
     -w /app `
-    -e WANDB_API_KEY=$wandb_token `
     --env-file .env `
+    --user ${USER_ID}:${GROUP_ID} `
     nvit:latest `
     torchrun --nnodes 1 --nproc_per_node $num_gpus --rdzv_endpoint=localhost:29501 nvit/train.py
