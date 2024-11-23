@@ -2,6 +2,7 @@
 
 # Default values
 num_gpus=1
+visible_gpus="all"
 
 # Load environment variables from .env file if it exists
 if [ -f .env ]; then
@@ -13,6 +14,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --num_gpus)
             num_gpus="$2"
+            shift 2
+            ;;
+        --visible_gpus)
+            visible_gpus="$2"
             shift 2
             ;;
         *)
@@ -28,11 +33,13 @@ GROUP_ID=$(id -g)
 
 # Run docker container with local directory mounted and execute training command
 docker run --rm \
-    --gpus all \
+    --gpus "\"device=$visible_gpus\"" \
     -v $(pwd):/app \
     -w /app \
     -e HOME=/app \
     -e TORCHINDUCTOR_CACHE_DIR=/app/.cache \
+    -e NCCL_TIMEOUT=1200 \
+    -e NCCL_DEBUG=INFO \
     --env-file .env \
     --user ${USER_ID}:${GROUP_ID} \
     nvit:latest \

@@ -1,6 +1,7 @@
 # Default values
 param(
-    [int]$num_gpus = 1
+    [int]$num_gpus = 1,
+    [string]$visible_gpus = "all"
 )
 
 # Load environment variables from .env file if it exists
@@ -18,11 +19,13 @@ $GROUP_ID = (Get-WmiObject -Class Win32_Group -Filter "Name = 'Users'").SID
 
 # Run docker container with local directory mounted and execute training command
 docker run --rm `
-    --gpus all `
+    --gpus "\"device=$visible_gpus\"" `
     -v ${PWD}:/app `
     -w /app `
     -e HOME=/app `
     -e TORCHINDUCTOR_CACHE_DIR=/app/.cache `
+    -e NCCL_TIMEOUT=1200 `
+    -e NCCL_DEBUG=INFO `
     --env-file .env `
     --user ${USER_ID}:${GROUP_ID} `
     nvit:latest `
