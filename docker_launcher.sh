@@ -3,6 +3,7 @@
 # Default values
 num_gpus=1
 visible_gpus="all"
+detached=false
 
 # Load environment variables from .env file if it exists
 if [ -f .env ]; then
@@ -20,6 +21,10 @@ while [[ $# -gt 0 ]]; do
             visible_gpus="$2"
             shift 2
             ;;
+        -d|--detached)
+            detached=true
+            shift
+            ;;
         *)
             echo "Unknown argument: $1"
             exit 1
@@ -31,8 +36,14 @@ done
 USER_ID=$(id -u)
 GROUP_ID=$(id -g)
 
+# Build docker run command
+docker_cmd="docker run --rm"
+if [ "$detached" = true ]; then
+    docker_cmd="$docker_cmd -d"
+fi
+
 # Run docker container with local directory mounted and execute training command
-docker run --rm \
+$docker_cmd \
     --gpus "\"device=$visible_gpus\"" \
     -v $(pwd):/app \
     -w /app \
