@@ -530,7 +530,7 @@ class Trainer:
             return
         
         if self.settings.wandb.mode == "online":
-            wandb.login(key=self.settings.wandb_api_key)  # loaded from secrets.yaml or environment variable NVIT_WANDB_API_KEY
+            wandb.login(key=self.settings.get('wandb_api_key', os.getenv('WANDB_API_KEY')))  # loaded from secrets.yaml or environment variable NVIT_WANDB_API_KEY, or WANDB_API_KEY
         
         wandb_config = {
             "model_config": asdict(self.model.config),
