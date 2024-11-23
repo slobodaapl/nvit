@@ -13,6 +13,7 @@ secrets.yaml
 *.egg-info
 *.egg-info
 **/__pycache__/**
+local_settings.yaml
 out/
 wandb/
 data/

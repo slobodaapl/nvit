@@ -86,10 +86,10 @@ class Trainer:
     def model(self) -> ViT:
         return self.get_module(self._model).module
     
-    def __init__(self, settings_path: str = "settings.yaml", secrets_path: str = "secrets.yaml"):
+    def __init__(self, secrets_path: str = "secrets.yaml"):
         self.settings = Dynaconf(
             envvar_prefix="NVIT",
-            settings_files=[settings_path],
+            settings_files=[f"local_settings.yaml", "settings.yaml"],
             secrets=secrets_path,
             load_dotenv=True
         )
