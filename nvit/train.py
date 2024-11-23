@@ -201,7 +201,7 @@ class Trainer:
         
     def setup_distributed(self) -> None:
         """Initialize distributed training settings"""
-        if not self.ddp:
+        if not self.ddp or not self.settings.system.use_ddp:
             self.master_process = True
             self.seed_offset = 0
             self.ddp_world_size = 1
