@@ -115,6 +115,10 @@ class Trainer:
         self.seed_offset: int = 0
         self.last_metrics: Dict[str, float] = {}
         
+        # Print all available cuda devices
+        print(f"Available CUDA devices: {torch.cuda.device_count()}")
+        print(f"CUDA device properties: {torch.cuda.get_device_properties(0)}")
+        
         # Setup signal handlers
         if self.master_process:
             signal.signal(signal.SIGINT, self.handle_signal)
