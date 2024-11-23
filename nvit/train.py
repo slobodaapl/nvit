@@ -89,7 +89,12 @@ class Trainer:
         return self.get_module(self._model).module
     
     def __init__(self, settings_path: str = "settings.yaml", secrets_path: str = "secrets.yaml"):
-        self.settings = Dynaconf(settings_files=[settings_path], secrets=secrets_path, envvar_prefix="NVIT")
+        self.settings = Dynaconf(
+            envvar_prefix="NVIT",
+            settings_files=[settings_path],
+            secrets=secrets_path,
+            load_dotenv=True
+        )
         self._model: ViT | DDP
         self.device: str
         self.optimizer: torch.optim.Optimizer
