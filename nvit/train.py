@@ -683,6 +683,7 @@ class Trainer:
                         self.logger.info(f"Failed to delete old artifact: {e}")
                 
                 # Store new version number
+                artifact.wait()
                 self.last_artifact_version = artifact.version
 
         # Optionally save numbered checkpoint
