@@ -325,18 +325,20 @@ class Trainer:
             # Create transform compositions
             train_transform = transforms.Compose(train_transform_list)
             val_transform = transforms.Compose(val_transform_list)
-
+            
             # Create datasets
             if self.settings.data.dataset.lower() == 'imagenet':
                 trainset = torchvision.datasets.ImageNet(
                     root='./data',
                     split='train',
-                    transform=train_transform
+                    transform=train_transform,
+                    download=self.master_process # Only download on main node
                 )
                 valset = torchvision.datasets.ImageNet(
-                    root='./data',
+                    root='./data', 
                     split='val',
-                    transform=val_transform
+                    transform=val_transform,
+                    download=self.master_process # Only download on main node
                 )
             else:  # CIFAR10 or CIFAR100
                 dataset_class = (torchvision.datasets.CIFAR10 
@@ -346,13 +348,13 @@ class Trainer:
                 trainset = dataset_class(
                     root='./data',
                     train=True,
-                    download=True,
+                    download=self.master_process, # Only download on main node
                     transform=train_transform
                 )
                 valset = dataset_class(
                     root='./data',
                     train=False,
-                    download=True,
+                    download=self.master_process, # Only download on main node
                     transform=val_transform
                 )
 
