@@ -209,21 +209,33 @@ class Trainer:
             self.ddp_world_size = 1
             return
         
+        # Add debug logging
+        self.logger.info("Initializing distributed training...")
+        self.logger.info(f"Environment variables: RANK={os.environ.get('RANK')}, "
+                        f"LOCAL_RANK={os.environ.get('LOCAL_RANK')}, "
+                        f"WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
+        
         self.ddp_rank = int(os.environ['RANK'])
         self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
         self.ddp_world_size = int(os.environ['WORLD_SIZE'])
 
+        # Initialize process group with timeout
         dist.init_process_group(
             backend=self.settings.system.backend,
-            world_size=self.ddp_world_size,
-            rank=self.ddp_rank,
-            device_id=torch.device(f'cuda:{self.ddp_local_rank}')
+            init_method='env://',  # Add explicit init method
+            timeout=timedelta(minutes=30)  # Add timeout
         )
         
         self.device = f'cuda:{self.ddp_local_rank}'
         torch.cuda.set_device(self.device)
         self.master_process = self.ddp_rank == 0
         self.seed_offset = self.ddp_rank
+
+        # Add synchronization point
+        dist.barrier()
+        
+        if self.master_process:
+            self.logger.info(f"Distributed training initialized with {self.ddp_world_size} GPUs")
 
         assert self.settings.training.gradient_accumulation_steps % self.ddp_world_size == 0
         self.settings.training.gradient_accumulation_steps //= self.ddp_world_size
@@ -475,7 +487,9 @@ class Trainer:
             self.model = cast(ViT, DDP(
                 self.model, 
                 device_ids=[self.ddp_local_rank],
-                static_graph=False  # Required for torch.compile compatibility
+                static_graph=False,  # Required for torch.compile compatibility
+                broadcast_buffers=False,
+                find_unused_parameters=False
             ))
             
         # Then compile if enabled
@@ -812,10 +826,34 @@ class Trainer:
         """Main training loop"""
         try:
             tlaunch = time.time()
-            self.train_loader, self.val_loader = self.get_data_loaders()
             
-            # Initialize wandb
-            self.setup_wandb()
+            # Add debug logging for data loading
+            self.logger.info("Setting up data loaders...")
+            self.train_loader, self.val_loader = self.get_data_loaders()
+            self.logger.info("Data loaders initialized successfully")
+            
+            # Initialize wandb only on master process
+            if self.master_process:
+                self.setup_wandb()
+            
+            # Ensure model is properly wrapped with DDP
+            if self.ddp:
+                self.logger.info(f"Model type before DDP wrap: {type(self.model)}")
+                if not isinstance(self.model, DDP):
+                    self.model = cast(ViT, DDP(
+                        self.model,
+                        device_ids=[self.ddp_local_rank],
+                        output_device=self.ddp_local_rank,
+                        static_graph=False,
+                        broadcast_buffers=False,
+                        find_unused_parameters=False
+                    ))
+                    self.model = cast(ViT, torch.compile(self.model))
+                self.logger.info(f"Model type after DDP wrap: {type(self.model)}")
+            
+            # Add synchronization point before training
+            if self.ddp:
+                dist.barrier()
             
             # Initialize progress bar
             pbar = tqdm(total=self.settings.training.max_iters, 
