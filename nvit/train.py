@@ -207,36 +207,45 @@ class Trainer:
             self.ddp_world_size = 1
             return
         
-        # Add debug logging
-        self.logger.info("Initializing distributed training...")
-        self.logger.info(f"Environment variables: RANK={os.environ.get('RANK')}, "
-                        f"LOCAL_RANK={os.environ.get('LOCAL_RANK')}, "
-                        f"WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
-        
-        self.ddp_rank = int(os.environ['RANK'])
-        self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        self.ddp_world_size = int(os.environ['WORLD_SIZE'])
+        try:
+            # Add debug logging
+            self.logger.info("Initializing distributed training...")
+            self.logger.info(f"Environment variables: RANK={os.environ.get('RANK')}, "
+                            f"LOCAL_RANK={os.environ.get('LOCAL_RANK')}, "
+                            f"WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
+            
+            self.ddp_rank = int(os.environ['RANK'])
+            self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
+            self.ddp_world_size = int(os.environ['WORLD_SIZE'])
 
-        # Initialize process group with timeout
-        dist.init_process_group(
-            backend=self.settings.system.backend,
-            init_method='env://',  # Add explicit init method
-            timeout=timedelta(minutes=30)  # Add timeout
-        )
-        
-        self.device = f'cuda:{self.ddp_local_rank}'
-        torch.cuda.set_device(self.device)
-        self.master_process = self.ddp_rank == 0
-        self.seed_offset = self.ddp_rank
+            # Set device before init_process_group
+            self.device = f'cuda:{self.ddp_local_rank}'
+            torch.cuda.set_device(self.device)
 
-        # Add synchronization point
-        dist.barrier()
-        
-        if self.master_process:
-            self.logger.info(f"Distributed training initialized with {self.ddp_world_size} GPUs")
+            # Initialize process group with explicit timeout and backend
+            dist.init_process_group(
+                backend=self.settings.system.backend,
+                init_method='env://',
+                timeout=timedelta(minutes=30)
+            )
+            
+            self.master_process = self.ddp_rank == 0
+            self.seed_offset = self.ddp_rank
 
-        assert self.settings.training.gradient_accumulation_steps % self.ddp_world_size == 0
-        self.settings.training.gradient_accumulation_steps //= self.ddp_world_size
+            # Wait for all processes to reach this point
+            dist.barrier()
+            
+            if self.master_process:
+                self.logger.info(f"Distributed training initialized with {self.ddp_world_size} GPUs")
+
+            # Adjust gradient accumulation steps
+            if hasattr(self.settings.training, 'gradient_accumulation_steps'):
+                assert self.settings.training.gradient_accumulation_steps % self.ddp_world_size == 0
+                self.settings.training.gradient_accumulation_steps //= self.ddp_world_size
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize distributed training: {e}")
+            raise
 
     def setup_device_context(self) -> None:
         """Setup device type and context for training"""
@@ -455,50 +464,56 @@ class Trainer:
 
     def initialize_model(self) -> None:
         """Initialize the model architecture"""
-        model_args = {
-            'image_size': self.settings.model.image_size,
-            'patch_size': self.settings.model.patch_size,
-            'n_layer': self.settings.model.n_layer,
-            'n_head': self.settings.model.n_head,
-            'n_embd': self.settings.model.n_embd,
-            'use_nViT': self.settings.model.use_nViT,
-            'dropout': self.settings.model.dropout,
-            'bias': self.settings.model.bias,
-            'num_classes': self.settings.model.num_classes
-        }
+        try:
+            model_args = {
+                'image_size': self.settings.model.image_size,
+                'patch_size': self.settings.model.patch_size,
+                'n_layer': self.settings.model.n_layer,
+                'n_head': self.settings.model.n_head,
+                'n_embd': self.settings.model.n_embd,
+                'use_nViT': self.settings.model.use_nViT,
+                'dropout': self.settings.model.dropout,
+                'bias': self.settings.model.bias,
+                'num_classes': self.settings.model.num_classes
+            }
 
-        if self.settings.training.init_from == 'scratch':
-            self.model = ViT(ViTConfig(**model_args))
-        elif self.settings.training.init_from == 'resume':
-            ckpt_path = Path(self.settings.data.checkpoint_dir) / self.settings.data.checkpoint_file
-            self.load_checkpoint(ckpt_path)
-        elif self.settings.training.init_from == 'wandb':
-            self.load_from_wandb(self.settings.wandb.artifact_name)
-        else:
-            raise ValueError(f"Invalid init_from value: {self.settings.training.init_from}")
-        
-        self.model.to(self.device)
-        
-        # First wrap with DDP if using distributed training
-        if self.ddp:
-            self.logger.info(f"DDP: {self.ddp}, wrapping the model")
-            self.model = cast(ViT, DDP(
-                self.model, 
-                device_ids=[self.ddp_local_rank],
-                static_graph=False,  # Required for torch.compile compatibility
-                broadcast_buffers=False,
-                find_unused_parameters=False
-            ))
+            if self.settings.training.init_from == 'scratch':
+                self.model = ViT(ViTConfig(**model_args))
+            elif self.settings.training.init_from == 'resume':
+                ckpt_path = Path(self.settings.data.checkpoint_dir) / self.settings.data.checkpoint_file
+                self.load_checkpoint(ckpt_path)
+            elif self.settings.training.init_from == 'wandb':
+                self.load_from_wandb(self.settings.wandb.artifact_name)
+            else:
+                raise ValueError(f"Invalid init_from value: {self.settings.training.init_from}")
             
-        # Then compile if enabled
-        if self.settings.system.compile:
-            self.logger.info("Compiling model with torch.compile()")
-            self.model = cast(ViT, torch.compile(self.model))
+            self.model.to(self.device)
+            
+            # First wrap with DDP if using distributed training
+            if self.ddp:
+                self.logger.info(f"Wrapping model with DDP on device {self.device}")
+                self.model = cast(ViT, DDP(
+                    self.model, 
+                    device_ids=[self.ddp_local_rank],
+                    output_device=self.ddp_local_rank,
+                    broadcast_buffers=False,
+                    find_unused_parameters=False,
+                    gradient_as_bucket_view=True  # Add this for better memory efficiency
+                ))
+                
+            # Then compile if enabled
+            if self.settings.system.compile:
+                self.logger.info("Compiling model with torch.compile()")
+                self.model = cast(ViT, torch.compile(self.model))
 
-        # Verify model wrapping
-        if self.ddp:
-            assert isinstance(self.model, (DDP, torch._dynamo.eval_frame.OptimizedModule)), \
-                f"Model should be DDP or compiled DDP, but got {type(self.model)}"
+            # Verify model wrapping
+            if self.ddp:
+                assert isinstance(self.model, (DDP, torch._dynamo.eval_frame.OptimizedModule)), \
+                    f"Model should be DDP or compiled DDP, but got {type(self.model)}"
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize model: {e}")
+            raise
 
     def normalize_matrices(self) -> None:
         """Normalize model matrices if using nViT"""
@@ -556,7 +571,6 @@ class Trainer:
             "system": self.settings.system,
         }
 
-        wandb.require("service")
         wandb.init(
             mode=self.settings.wandb.mode,
             project=self.settings.wandb.project,
@@ -837,19 +851,23 @@ class Trainer:
             
             # Add synchronization point before training
             if self.ddp:
+                self.logger.info("Waiting for all processes at barrier before training...")
                 dist.barrier()
-            
-            # Initialize progress bar
-            pbar = tqdm(total=self.settings.training.max_iters, 
-                       initial=self.iter_num,
-                       desc="Training",
-                       disable=not self.master_process)
-            
-            postfix: Dict[str, Union[str, float, int]] = OrderedDict({
-                "loss": "+inf", 
-                "lr": f"{self.settings.optimizer.learning_rate:.4e}", 
-                "time_ms": "0.000"
-            })
+                self.logger.info("All processes synchronized, starting training...")
+
+            # Initialize progress bar if enabled
+            if self.settings.system.use_tqdm and self.master_process:
+                pbar = tqdm(total=self.settings.training.max_iters, 
+                           initial=self.iter_num,
+                           desc="Training")
+                postfix: Dict[str, Union[str, float, int]] | None = OrderedDict({
+                    "loss": "+inf", 
+                    "lr": f"{self.settings.optimizer.learning_rate:.4e}", 
+                    "time_ms": "0.000"
+                })
+            else:
+                pbar = None
+                postfix = None
 
             # Initialize training state
             local_iter_num = 0
@@ -976,26 +994,36 @@ class Trainer:
                     self.iter_num += 1
                     local_iter_num += 1
                     
-                    if self.master_process:
+                    # Update progress bar if enabled
+                    if pbar is not None and self.master_process:
                         pbar.update(1)
-                        postfix.update({"epoch": current_epoch})
+                        postfix.update({"epoch": current_epoch})  # type: ignore
                         if metrics:
-                            postfix.update(**{
+                            postfix.update(**{  # type: ignore
                                 "loss": f"{metrics['train/batch_loss']:.4f}", 
                                 "lr": f"{metrics['optimizer/learning_rate']:.4e}", 
                                 "time_ms": f"{dt*1000:.1f}"
                             })
                             metrics = None
-                        pbar.set_postfix(ordered_dict=postfix)
-                    
-                    if self.iter_num >= self.settings.training.max_iters:
-                        self.mark_training_finished()
+                        pbar.set_postfix(ordered_dict=postfix)  # type: ignore
+                    elif self.master_process and self.iter_num % self.settings.training.log_interval == 0:
+                        # Log progress without tqdm
+                        self.logger.info(
+                            f"Iter: {self.iter_num}/{self.settings.training.max_iters} "
+                            f"Loss: {loss.item():.4f} "
+                            f"LR: {lr:.4e} "
+                            f"Time: {dt*1000:.1f}ms"
+                        )
 
                 current_epoch += 1
 
             if self.ddp:
                 dist.barrier()
                 dist.destroy_process_group()
+
+            # Close progress bar if it exists
+            if pbar is not None:
+                pbar.close()
 
         except Exception as e:
             self.handle_error(e)

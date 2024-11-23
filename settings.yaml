@@ -55,6 +55,7 @@ system:
   quick_validation: true
   quick_validation_size: 1000
   use_amp: true
+  use_tqdm: true
 
 wandb:
   mode: "online"
