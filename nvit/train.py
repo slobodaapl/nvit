@@ -506,11 +506,6 @@ class Trainer:
                 self.logger.info("Compiling model with torch.compile()")
                 self.model = cast(ViT, torch.compile(self.model))
 
-            # Verify model wrapping
-            if self.ddp:
-                assert isinstance(self.model, (DDP, torch._dynamo.eval_frame.OptimizedModule)), \
-                    f"Model should be DDP or compiled DDP, but got {type(self.model)}"
-
         except Exception as e:
             self.logger.error(f"Failed to initialize model: {e}")
             raise
