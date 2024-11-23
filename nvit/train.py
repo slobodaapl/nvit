@@ -556,6 +556,7 @@ class Trainer:
             "system": self.settings.system,
         }
 
+        wandb.require("service")
         wandb.init(
             mode=self.settings.wandb.mode,
             project=self.settings.wandb.project,

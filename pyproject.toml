@@ -14,7 +14,7 @@ psutil = "6.*"
 einops = "0.*"
 pydantic = "2.*"
 dynaconf = "3.*"
-wandb = "0.*"
+wandb = ">=0.13.0,0.*"
 
 [[tool.poetry.source]]
 name = "pytorch-gpu"
