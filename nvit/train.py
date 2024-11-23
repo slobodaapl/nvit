@@ -388,7 +388,7 @@ class Trainer:
             train_sampler = DistributedSampler(
                 trainset,
                 num_replicas=self.ddp_world_size if self.ddp else 1,
-                rank=self.ddp_rank if self.ddp else 0,
+                rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
                 shuffle=True,
                 seed=self.settings.training.seed if hasattr(self.settings.training, 'seed') else 42
             ) if self.ddp else None
@@ -396,9 +396,9 @@ class Trainer:
             val_sampler = DistributedSampler(
                 valset,
                 num_replicas=self.ddp_world_size if self.ddp else 1,
-                rank=self.ddp_rank if self.ddp else 0,
+                rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
                 shuffle=False
-            ) if self.ddp else None
+            ) if self.ddp and not self.settings.system.use_ddp else None
 
             # Create data loaders with appropriate samplers
             train_loader = DataLoader(
@@ -490,7 +490,7 @@ class Trainer:
             self.model.to(self.device)
             
             # First wrap with DDP if using distributed training
-            if self.ddp:
+            if self.ddp and self.settings.system.use_ddp:
                 self.logger.info(f"Wrapping model with DDP on device {self.device}")
                 self.model = cast(ViT, DDP(
                     self.model, 
@@ -574,7 +574,7 @@ class Trainer:
         )
         
         # Only watch the model if not using DDP or torch.compile
-        if not self.ddp and not self.settings.system.compile:
+        if not self.ddp or (self.settings.system.use_ddp and not self.settings.system.compile):
             wandb.watch(
                 self.model,
                 log="all",
@@ -1165,7 +1165,7 @@ class Trainer:
 
     def log_gpu_stats(self) -> Dict[str, float]:
         """Log multi-GPU training statistics"""
-        if not torch.cuda.is_available() or not self.ddp or not self.settings.system.log_gpu_stats:
+        if not torch.cuda.is_available() or not self.ddp or not self.settings.system.use_ddp or not self.settings.system.log_gpu_stats:
             return {}
         
         metrics = {}
