@@ -31,6 +31,7 @@ docker run --rm \
     --gpus all \
     -v $(pwd):/app \
     -w /app \
+    -e HOME=/app \
     --env-file .env \
     --user ${USER_ID}:${GROUP_ID} \
     nvit:latest \
