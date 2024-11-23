@@ -32,6 +32,7 @@ docker run --rm \
     -v $(pwd):/app \
     -w /app \
     -e HOME=/app \
+    -e TORCHINDUCTOR_CACHE_DIR=/app/.cache \
     --env-file .env \
     --user ${USER_ID}:${GROUP_ID} \
     nvit:latest \
