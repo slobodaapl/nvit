@@ -108,6 +108,7 @@ class Trainer:
         self.finished: bool = False
         self.master_process: bool = True
         self.seed_offset: int = 0
+        self.last_metrics: Dict[str, float] = {}
         
         # Setup signal handlers
         if self.master_process:
@@ -148,16 +149,30 @@ class Trainer:
         self.logger = logging.getLogger(__name__)
 
     def cleanup(self) -> None:
-        """Cleanup resources"""
-        if wandb.run is not None:
-            wandb.finish()
+        """Cleanup resources in correct order"""
+        try:
+            # First save final checkpoint if needed
+            if self.master_process and self.iter_num > 0:
+                self.save_checkpoint(
+                    self.iter_num,
+                    self.last_metrics,  # Use stored metrics instead of placeholder
+                    torch.get_rng_state()
+                )
             
-        if self.ddp:
-            try:
-                dist.barrier()
-                dist.destroy_process_group()
-            except Exception as e:
-                self.logger.error(f"Error during DDP cleanup: {e}")
+            # Then cleanup DDP if it was used
+            if self.ddp:
+                try:
+                    dist.barrier()
+                    dist.destroy_process_group()
+                except Exception as e:
+                    self.logger.error(f"Error during DDP cleanup: {e}")
+            
+            # Finally cleanup wandb
+            if wandb.run is not None:
+                wandb.finish()
+            
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}")
 
     def validate_only(self) -> Dict[str, float]:
         """Run validation only mode"""
@@ -474,10 +489,6 @@ class Trainer:
 
         model_obj = self.get_module(cast(ViT, self.model))
         
-        # Normalize embedding and output layers
-        model_obj.transformer.wte.weight.data.copy_(justnorm(model_obj.transformer.wte.weight.data, 1))
-        model_obj.module.lm_head.weight.data.copy_(justnorm(model_obj.module.lm_head.weight.data, 1))
-        
         # Normalize transformer blocks
         for block in model_obj.transformer.h:
             block.query.weight.data.copy_(justnorm(block.query.weight.data, 1))
@@ -618,6 +629,9 @@ class Trainer:
         tcheckpointsaving_begin = time.time()
         raw_model = self.get_module(self.model).module
         
+        # Format timestamp properly
+        timestamp = time.strftime('%d_%m_%Y-%Hh%Mm')
+        
         checkpoint = {
             'model': raw_model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
@@ -627,7 +641,7 @@ class Trainer:
             'config': self.settings.to_dict(),
             'rng_state_pytorch': rng_state_pytorch,
             'rng_state_numpy': np.random.get_state(),
-            'timestamp': time.strftime('%Y%m%d_%H%M%S')
+            'timestamp': timestamp
         }
 
         # Save latest checkpoint locally
@@ -636,7 +650,7 @@ class Trainer:
 
         # Handle best checkpoint
         current_val_loss = metrics['val/loss']
-        is_best = current_val_loss < getattr(self, 'best_val_loss', float('inf')) or float('inf')
+        is_best = current_val_loss < getattr(self, 'best_val_loss', float('inf'))
         
         if is_best:
             self.best_val_loss = current_val_loss
@@ -647,15 +661,18 @@ class Trainer:
             
             # Save to wandb if enabled
             if wandb.run is not None:
+                # Create artifact name with timestamp
+                artifact_name = f"model-{self.settings.wandb.run_name}-{'nvit' if self.settings.model.use_nViT else 'vit'}-{timestamp}"
+                
                 # Create a wandb Artifact
                 artifact = wandb.Artifact(
-                    name=f"model-{self.settings.wandb.run_name[:-1]}-{'nvit' if self.settings.model.use_nViT else 'vit'}",
+                    name=artifact_name,
                     type="model",
                     metadata={
                         "iter_num": iter_num,
                         "val_loss": current_val_loss,
                         "metrics": metrics,
-                        "timestamp": checkpoint['timestamp'],
+                        "timestamp": timestamp,
                         "using_nvit": self.settings.model.use_nViT
                     }
                 )
@@ -673,23 +690,16 @@ class Trainer:
                         run = wandb.run
                         
                         if run is None:
-                            raise ValueError("Wandb run is not initialized, something went wrong")
+                            raise ValueError("Wandb run is not initialized")
                         
-                        artifact = api.artifact(
-                            f"{run.entity}/{run.project}/model-{self.settings.wandb.run_name}:{self.last_artifact_version}"
-                        )
+                        old_artifact_name = f"{run.entity}/{run.project}/{self.last_artifact_version}"
+                        artifact = api.artifact(old_artifact_name)
                         artifact.delete()
                     except Exception as e:
                         self.logger.info(f"Failed to delete old artifact: {e}")
                 
-                # Store new version number
-                artifact.wait()
-                self.last_artifact_version = artifact.version
-
-        # Optionally save numbered checkpoint
-        if self.settings.training.save_numbered_checkpoints:
-            numbered_path = Path(self.settings.data.out_dir) / f'checkpoint_{iter_num:06d}.pt'
-            torch.save(checkpoint, numbered_path)
+                # Store new artifact name
+                self.last_artifact_version = artifact_name
 
         self.logger.info(f"Checkpoint saving time: {time.time()-tcheckpointsaving_begin:.2f} sec")
 
@@ -727,6 +737,9 @@ class Trainer:
             "optimizer/learning_rate": self.get_lr(self.iter_num) if self.settings.optimizer.decay_lr else self.settings.optimizer.learning_rate,
             "training/global_step": self.iter_num,
         }
+        
+        # Store metrics for later use
+        self.last_metrics = metrics.copy()
         
         # Add model statistics
         if hasattr(self.model, 'parameters'):
@@ -979,7 +992,7 @@ class Trainer:
         
         model_obj = self.get_module(cast(ViT, self.model))
         
-        resstr = f"{torch.mean(model_obj.module.sz * (model_obj.module.sz_init_value/model_obj.module.sz_init_scaling)):.5f} "
+        resstr = f"{torch.mean(model_obj.module.sz * (self.settings.model.sz_init_value / self.settings.model.sz_init_scaling)):.5f} " if self.settings.model.use_nViT else "No sz, not using nViT"
         
         for block in model_obj.transformer.h:
             sqk = block.sqk * (block.sqk_init_value/block.sqk_init_scaling)

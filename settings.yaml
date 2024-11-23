@@ -14,10 +14,10 @@ training:
   save_numbered_checkpoints: false
 
 optimizer:
-  learning_rate: 0.0015
+  learning_rate: 0.0005
   min_lr: 1e-5
   warmup_iters: 1000
-  lr_decay_iters: 2000
+  lr_decay_iters: 10000
   decay_lr: true
   weight_decay: 0.1
   beta1: 0.9
@@ -34,10 +34,12 @@ model:
   n_layer: 3
   n_head: 4
   n_embd: 128
-  use_nViT: 0
+  use_nViT: 1
   num_classes: 10
-  dropout: 0.0
-  bias: false
+  dropout: 0.05
+  bias: true
+  sz_init_value: 1.00
+  sz_init_scaling: 1.0
 
 system:
   device: "cuda"

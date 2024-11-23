@@ -18,6 +18,8 @@ class ViTConfig:
     n_embd: int = 1024
     base_scale: float = 1.0 / (1024.0 ** 0.5)    # 1 / sqrt(n_embd)
     use_nViT: int = 0
+    sz_init_value: float = 1.00
+    sz_init_scaling: float = 1.0
     dropout: float = 0.0
     bias: bool = False
     channels: int = 3
@@ -44,20 +46,20 @@ class Block(nn.Module):
             self.rmsnorm_mlp = RMSNorm(config.n_embd)
 
         if (config.use_nViT == 1):
-            self.attn_alpha_init_value = 0.05
-            self.attn_alpha_init_scaling = config.base_scale
+            self.attn_alpha_init_value = torch.scalar_tensor(0.05, dtype=torch.float32)
+            self.attn_alpha_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
             self.attn_alpha = torch.nn.Parameter(self.attn_alpha_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
 
-            self.mlp_alpha_init_value = 0.05
-            self.mlp_alpha_init_scaling = config.base_scale
+            self.mlp_alpha_init_value = torch.scalar_tensor(0.05, dtype=torch.float32)
+            self.mlp_alpha_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
             self.mlp_alpha = torch.nn.Parameter(self.mlp_alpha_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
 
-            self.sqk_init_value = 1.0       
-            self.sqk_init_scaling = config.base_scale
+            self.sqk_init_value = torch.scalar_tensor(1.0, dtype=torch.float32)
+            self.sqk_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
             self.sqk = torch.nn.Parameter(self.sqk_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
 
-            self.suv_init_value = 1.0
-            self.suv_init_scaling = 1.0
+            self.suv_init_value = torch.scalar_tensor(1.0, dtype=torch.float32)
+            self.suv_init_scaling = torch.scalar_tensor(1.0, dtype=torch.float32)
             self.suv = torch.nn.Parameter(self.suv_init_scaling*torch.ones(2 * 4 * config.n_embd, dtype=torch.float32))
 
     
@@ -91,6 +93,9 @@ class Block(nn.Module):
         head_size = C // self.config.n_head
         sqrt_head_dim = head_size ** 0.5
         softmax_scale = 1.0 / sqrt_head_dim if self.config.use_nViT == 0 else sqrt_head_dim
+        
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
         
         # Get attention output [B, H, T, D]
         attn_output = cast(torch.Tensor,flex_attention(q, k, v, scale=softmax_scale))
@@ -201,10 +206,15 @@ class ViT(nn.Module):
             nn.LayerNorm(config.n_embd),
             nn.Linear(config.n_embd, config.num_classes)
         )
+        
+        if self.config.use_nViT == 1:
+            self.sz = torch.nn.Parameter(
+                self.config.sz_init_scaling * torch.ones(config.num_classes, dtype=torch.float32)
+            )
 
         # Initialize weights
         self.apply(self._init_weights)
-        # Apply special scaled init to the residual projections, per GPT-2 paper
+        
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
@@ -217,31 +227,25 @@ class ViT(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             torch.nn.init.zeros_(module.bias)
             torch.nn.init.ones_(module.weight)
+        if self.config.use_nViT == 1 and isinstance(module, nn.Linear):
+            torch.nn.init.constant_(self.sz, self.config.sz_init_value)
 
     def configure_optimizers(self, weight_decay: float, learning_rate: float, betas: Tuple[float, float], device_type: str) -> torch.optim.AdamW:
-        # Start with all of the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        # Filter out those that do not require grad
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # Create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        
+        if self.config.use_nViT == 1:
+            optimizer_grouped_parameters = [
+                {'params': [p for n, p in param_dict.items() if 'sz' not in n and p.dim() >= 2], 'weight_decay': weight_decay},
+                {'params': [p for n, p in param_dict.items() if 'sz' not in n and p.dim() < 2], 'weight_decay': 0.0},
+                {'params': [self.sz], 'weight_decay': 0.0}
+            ]
+        else:
+            optimizer_grouped_parameters = [
+                {'params': [p for n, p in param_dict.items() if p.dim() >= 2], 'weight_decay': weight_decay},
+                {'params': [p for n, p in param_dict.items() if p.dim() < 2], 'weight_decay': 0.0}
+            ]
 
+        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=learning_rate, betas=betas, fused=True if device_type == "cuda" else False)
         return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> Tuple[float, float]:
@@ -276,7 +280,13 @@ class ViT(nn.Module):
             
         # Pool and classify
         x = x.mean(dim=1)  # Global average pooling
-        return self.mlp_head(x)
+        logits = self.mlp_head(x)
+
+        if self.config.use_nViT == 1:
+            sz = self.sz * (self.config.sz_init_value / self.config.sz_init_scaling)
+            logits = sz * logits
+
+        return logits
 
     @property
     def num_params(self) -> int:
