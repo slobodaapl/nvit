@@ -30,7 +30,6 @@ optimizer:
 
 model:
   image_size: 32
-  patch_size: 4
   n_layer: 3
   n_head: 4
   n_embd: 128
@@ -40,6 +39,13 @@ model:
   bias: true
   sz_init_value: 1.00
   sz_init_scaling: 1.0
+  local_patch_size: 8
+  global_patch_size: 16
+  kohonen_nodes: 512
+  kohonen_alpha: 0.01
+  use_kohonen: true
+  reconstruction_weight: 0.1
+  map_balance_weight: 0.5
 
 system:
   device: "cuda"

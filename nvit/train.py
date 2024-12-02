@@ -1,45 +1,37 @@
-import os
+import functools
 import gc
+import logging
+import math
+import os
+import signal
 import sys
 import time
-import math
-import signal
-import logging
-import functools
-from pathlib import Path
-from dataclasses import asdict
-from datetime import timedelta
-from dataclasses import dataclass
-from contextlib import nullcontext
 from collections import OrderedDict
-from typing import Union, cast, Any, Optional, Dict, Tuple
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass
+from datetime import timedelta
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple, Union, cast
 
-import torchvision
-import torchvision.transforms as transforms
-
+import numpy as np
+import psutil
 import torch
 import torch.distributed as dist
+import torchvision
+from dynaconf import Dynaconf
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
-from torch.utils.data import DataLoader, Subset
-from torch.nn import ModuleDict, functional as F
-from torch.utils.data.distributed import DistributedSampler
+from torch.nn import ModuleDict
+from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim.lr_scheduler import (
-    CosineAnnealingLR, 
-    LinearLR, 
-    SequentialLR, 
-    ReduceLROnPlateau,
-    _LRScheduler
-)
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, ReduceLROnPlateau, SequentialLR, _LRScheduler
+from torch.utils.data import DataLoader, Subset
+from torch.utils.data.distributed import DistributedSampler
+from torchvision import transforms
+from tqdm import tqdm
 
 import wandb
-import psutil
-import numpy as np
-from tqdm import tqdm
-from dynaconf import Dynaconf
-
-from nvit.model import ViTConfig, ViT
+from nvit.model import ViT, ViTConfig
 
 
 @dataclass
@@ -56,14 +48,14 @@ class MockDPPModel(ViT):
 
 
 class Trainer:
-    
+
     @functools.cached_property
     def ddp(self) -> bool:
-        return int(os.environ.get('RANK', -1)) != -1
-    
+        return int(os.environ.get("RANK", -1)) != -1
+
     @functools.cache
     def get_module(self, model: ViT) -> Model:
-        if hasattr(model, 'module'):
+        if hasattr(model, "module"):
             transformer = model.module.transformer
             config = model.module.config
             module = model.module
@@ -72,26 +64,26 @@ class Trainer:
             config = model.config
             module = model
         return Model(config, transformer, module)
-    
+
     @property
     def model(self) -> ViT:
         ...
-    
+
     @model.setter
     def model(self, value: ViT) -> None:
         self._model = value
         self.get_module.cache_clear()
-        
+
     @model.getter
     def model(self) -> ViT:
         return self.get_module(self._model).module
-    
+
     def __init__(self, secrets_path: str = "secrets.yaml"):
         self.settings = Dynaconf(
             envvar_prefix="NVIT",
             settings_files=["settings.yaml"],
             secrets=secrets_path,
-            load_dotenv=True
+            load_dotenv=True,
         )
         self._model: ViT | DDP
         self.device: str
@@ -99,59 +91,59 @@ class Trainer:
         self.train_loader: DataLoader
         self.val_loader: DataLoader
         self.ctx: Any
-        
+
         self.early_stopping_counter: Optional[int] = None
         self.last_artifact_version: Optional[str] = None
         self.best_val_loss: Optional[float] = None
         self.ddp_rank: Optional[int] = None
         self.ddp_local_rank: Optional[int] = None
         self.ddp_world_size: Optional[int] = None
-        
+
         self.iter_num: int = 0
         self.finished: bool = False
         self.master_process: bool = True
         self.seed_offset: int = 0
         self.last_metrics: Dict[str, float] = {}
-        
+
         # Print all available cuda devices
         print(f"Available CUDA devices: {torch.cuda.device_count()}")
         print(f"CUDA device properties: {torch.cuda.get_device_properties(0)}")
-        
+
         # Setup signal handlers
         if self.master_process:
             signal.signal(signal.SIGINT, self.handle_signal)
             signal.signal(signal.SIGTERM, self.handle_signal)
-        
+
         self.prep_folder()
         self.setup_logging()
         self.setup_distributed()
         self.setup_device_context()
         self.initialize_model()
-        
+
         self.optimizer = self.model.configure_optimizers(
             self.settings.optimizer.weight_decay,
             self.settings.optimizer.learning_rate,
             (self.settings.optimizer.beta1, self.settings.optimizer.beta2),
-            self.device
+            self.device,
         )
-        
+
         self.scheduler: Optional[_LRScheduler] = None
         self.scaler: Optional[GradScaler] = None
-        
+
         # Setup AMP scaler if using mixed precision
-        if self.settings.system.use_amp and self.settings.system.dtype in ['float16', 'bfloat16']:
+        if self.settings.system.use_amp and self.settings.system.dtype in ["float16", "bfloat16"]:
             self.scaler = GradScaler()
-    
+
     def setup_logging(self) -> None:
         """Setup logging configuration"""
         log_level = logging.INFO if self.master_process else logging.WARNING
         logging.basicConfig(
             level=log_level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             handlers=[
                 logging.StreamHandler(),
-                logging.FileHandler(Path(self.settings.data.out_dir) / 'training.log')
-            ] if self.master_process else [logging.StreamHandler()]
+                logging.FileHandler(Path(self.settings.data.out_dir) / "training.log"),
+            ] if self.master_process else [logging.StreamHandler()],
         )
         self.logger = logging.getLogger(__name__)
 
@@ -163,9 +155,9 @@ class Trainer:
                 self.save_checkpoint(
                     self.iter_num,
                     self.last_metrics,  # Use stored metrics instead of placeholder
-                    torch.get_rng_state()
+                    torch.get_rng_state(),
                 )
-            
+
             # Then cleanup DDP if it was used
             if self.ddp:
                 try:
@@ -173,11 +165,11 @@ class Trainer:
                     dist.destroy_process_group()
                 except Exception as e:
                     self.logger.error(f"Error during DDP cleanup: {e}")
-            
+
             # Finally cleanup wandb
             if wandb.run is not None:
                 wandb.finish()
-            
+
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
 
@@ -185,10 +177,10 @@ class Trainer:
         """Run validation only mode"""
         self.logger.info("Running in validation-only mode")
         self.train_loader, self.val_loader = self.get_data_loaders()
-        
+
         if self.settings.training.init_from != "resume":
             raise ValueError("Must provide a checkpoint to run validation-only mode")
-            
+
         metrics = self.validate()
         self.logger.info(f"Validation metrics: {metrics}")
         return metrics
@@ -198,7 +190,7 @@ class Trainer:
         if self.master_process:
             if not os.path.exists(self.settings.data.out_dir):
                 os.makedirs(self.settings.data.out_dir, mode=0o777, exist_ok=True)
-        
+
     def setup_distributed(self) -> None:
         """Initialize distributed training settings"""
         if not self.ddp or not self.settings.system.use_ddp:
@@ -207,40 +199,40 @@ class Trainer:
             self.ddp_world_size = 1
             self.device = self.settings.system.device
             return
-        
+
         try:
             # Add debug logging
             self.logger.info("Initializing distributed training...")
             self.logger.info(f"Environment variables: RANK={os.environ.get('RANK')}, "
                             f"LOCAL_RANK={os.environ.get('LOCAL_RANK')}, "
                             f"WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
-            
-            self.ddp_rank = int(os.environ['RANK'])
-            self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
-            self.ddp_world_size = int(os.environ['WORLD_SIZE'])
+
+            self.ddp_rank = int(os.environ["RANK"])
+            self.ddp_local_rank = int(os.environ["LOCAL_RANK"])
+            self.ddp_world_size = int(os.environ["WORLD_SIZE"])
 
             # Set device before init_process_group
-            self.device = f'cuda:{self.ddp_local_rank}'
+            self.device = f"cuda:{self.ddp_local_rank}"
             torch.cuda.set_device(self.device)
 
             # Initialize process group with explicit timeout and backend
             dist.init_process_group(
                 backend=self.settings.system.backend,
-                init_method='env://',
-                timeout=timedelta(minutes=30)
+                init_method="env://",
+                timeout=timedelta(minutes=30),
             )
-            
+
             self.master_process = self.ddp_rank == 0
             self.seed_offset = self.ddp_rank
 
             # Wait for all processes to reach this point
             dist.barrier()
-            
+
             if self.master_process:
                 self.logger.info(f"Distributed training initialized with {self.ddp_world_size} GPUs")
 
             # Adjust gradient accumulation steps
-            if hasattr(self.settings.training, 'gradient_accumulation_steps'):
+            if hasattr(self.settings.training, "gradient_accumulation_steps"):
                 assert self.settings.training.gradient_accumulation_steps % self.ddp_world_size == 0
                 self.settings.training.gradient_accumulation_steps //= self.ddp_world_size
 
@@ -252,13 +244,13 @@ class Trainer:
         """Setup device type and context for training"""
         device_type = self.settings.system.device
         ptdtype = {
-            'float32': torch.float32,
-            'bfloat16': torch.bfloat16,
-            'float16': torch.float16
+            "float32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
         }[self.settings.system.dtype]
-        
+
         self.ctx = (
-            nullcontext() if device_type == 'cpu' or not self.settings.system.use_amp 
+            nullcontext() if device_type == "cpu" or not self.settings.system.use_amp
             else autocast(device_type=device_type, dtype=ptdtype)
         )
 
@@ -267,12 +259,12 @@ class Trainer:
         try:
             trainset = None
             valset = None
-            
+
             # Get base transforms
             train_transform_list = []
             val_transform_list = []
-            
-            if self.settings.data.dataset.lower() == 'imagenet':
+
+            if self.settings.data.dataset.lower() == "imagenet":
                 # Base transforms for ImageNet
                 train_transform_list.extend([
                     transforms.RandomResizedCrop(self.settings.model.image_size),
@@ -282,14 +274,14 @@ class Trainer:
                     transforms.Resize(256),
                     transforms.CenterCrop(self.settings.model.image_size),
                 ])
-                
+
                 # Normalization values for ImageNet
                 normalize = transforms.Normalize(
                     mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
+                    std=[0.229, 0.224, 0.225],
                 )
-                
-            elif self.settings.data.dataset.lower() in ['cifar10', 'cifar100']:
+
+            elif self.settings.data.dataset.lower() in ["cifar10", "cifar100"]:
                 # Base transforms for CIFAR
                 train_transform_list.extend([
                     transforms.RandomCrop(32, padding=4),
@@ -299,11 +291,11 @@ class Trainer:
                 val_transform_list.extend([
                     transforms.Resize(self.settings.model.image_size),
                 ])
-                
+
                 # Normalization values for CIFAR
                 normalize = transforms.Normalize(
                     mean=(0.5, 0.5, 0.5),
-                    std=(0.5, 0.5, 0.5)
+                    std=(0.5, 0.5, 0.5),
                 )
             else:
                 raise ValueError(f"Unsupported dataset: {self.settings.data.dataset}")
@@ -316,28 +308,28 @@ class Trainer:
                             brightness=self.settings.data.augmentation.color_jitter,
                             contrast=self.settings.data.augmentation.color_jitter,
                             saturation=self.settings.data.augmentation.color_jitter,
-                        )
+                        ),
                     )
-                
+
                 if self.settings.data.augmentation.random_affine:
                     train_transform_list.append(
                         transforms.RandomAffine(
                             degrees=15,
-                            translate=(0.1, 0.1)
-                        )
+                            translate=(0.1, 0.1),
+                        ),
                     )
-                
+
                 if self.settings.data.augmentation.cutout:
                     train_transform_list.append(
                         transforms.RandomErasing(
                             p=0.5,
                             scale=(0.02, 0.33),
                             ratio=(0.3, 3.3),
-                        )
+                        ),
                     )
-                    
+
                 if self.settings.data.augmentation.auto_augment:
-                    if self.settings.data.dataset.lower() == 'imagenet':
+                    if self.settings.data.dataset.lower() == "imagenet":
                         train_transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET))
                     else:
                         train_transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10))
@@ -349,37 +341,37 @@ class Trainer:
             # Create transform compositions
             train_transform = transforms.Compose(train_transform_list)
             val_transform = transforms.Compose(val_transform_list)
-            
+
             # Create datasets
-            if self.settings.data.dataset.lower() == 'imagenet':
+            if self.settings.data.dataset.lower() == "imagenet":
                 trainset = torchvision.datasets.ImageNet(
-                    root='./data',
-                    split='train',
+                    root="./data",
+                    split="train",
                     transform=train_transform,
-                    download=self.master_process # Only download on main node
+                    download=self.master_process, # Only download on main node
                 )
                 valset = torchvision.datasets.ImageNet(
-                    root='./data', 
-                    split='val',
+                    root="./data",
+                    split="val",
                     transform=val_transform,
-                    download=self.master_process # Only download on main node
+                    download=self.master_process, # Only download on main node
                 )
             else:  # CIFAR10 or CIFAR100
-                dataset_class = (torchvision.datasets.CIFAR10 
-                               if self.settings.data.dataset.lower() == 'cifar10'
+                dataset_class = (torchvision.datasets.CIFAR10
+                               if self.settings.data.dataset.lower() == "cifar10"
                                else torchvision.datasets.CIFAR100)
-                
+
                 trainset = dataset_class(
-                    root='./data',
+                    root="./data",
                     train=True,
                     download=self.master_process, # Only download on main node
-                    transform=train_transform
+                    transform=train_transform,
                 )
                 valset = dataset_class(
-                    root='./data',
+                    root="./data",
                     train=False,
                     download=self.master_process, # Only download on main node
-                    transform=val_transform
+                    transform=val_transform,
                 )
 
             if trainset is None or valset is None:
@@ -391,74 +383,74 @@ class Trainer:
                 num_replicas=self.ddp_world_size if self.ddp else 1,
                 rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
                 shuffle=True,
-                seed=self.settings.training.seed if hasattr(self.settings.training, 'seed') else 42
+                seed=self.settings.training.seed if hasattr(self.settings.training, "seed") else 42,
             ) if self.ddp else None
 
             val_sampler = DistributedSampler(
                 valset,
                 num_replicas=self.ddp_world_size if self.ddp else 1,
                 rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
-                shuffle=False
+                shuffle=False,
             ) if self.ddp and not self.settings.system.use_ddp else None
 
             # Create data loaders with appropriate samplers
             train_loader = DataLoader(
-                trainset, 
+                trainset,
                 batch_size=self.settings.training.batch_size,
                 shuffle=(train_sampler is None),  # Don't shuffle if using sampler
                 sampler=train_sampler,
                 num_workers=self.settings.data.num_workers,
-                pin_memory=True if self.settings.system.device == 'cuda' else False,
-                drop_last=True  # Recommended for DDP to avoid uneven batch sizes
+                pin_memory=True if self.settings.system.device == "cuda" else False,
+                drop_last=True,  # Recommended for DDP to avoid uneven batch sizes
             )
-            
+
             val_loader = DataLoader(
-                valset, 
+                valset,
                 batch_size=self.settings.training.batch_size,
                 shuffle=False,  # Don't shuffle validation
                 sampler=val_sampler,
                 num_workers=self.settings.data.num_workers,
-                pin_memory=True if self.settings.system.device == 'cuda' else False,
-                drop_last=False
+                pin_memory=True if self.settings.system.device == "cuda" else False,
+                drop_last=False,
             )
-            
+
             return train_loader, val_loader
-            
+
         except Exception as e:
             self.logger.error(f"Error loading datasets: {e}")
             raise
-    
+
     def load_from_wandb(self, artifact_name: str) -> None:
         """Load model from wandb artifact"""
         if self.settings.wandb.mode != "online":
             raise ValueError("Wandb must be enabled and online to load from artifacts")
-        
+
         api = wandb.Api()
-        artifact = api.artifact(artifact_name, type='model')
+        artifact = api.artifact(artifact_name, type="model")
         artifact_dir = artifact.download()
-        
-        checkpoint_path = Path(artifact_dir) / 'checkpoint_best.pt'
+
+        checkpoint_path = Path(artifact_dir) / "checkpoint_best.pt"
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found in artifact: {checkpoint_path}")
-        
+
         self.load_checkpoint(checkpoint_path)
 
     def load_checkpoint(self, checkpoint_path: Path) -> None:
         """Load checkpoint from path"""
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            self.model = ViT(ViTConfig(**checkpoint['model_args']))
-            self.model.load_state_dict(checkpoint['model'])
-            self.optimizer.load_state_dict(checkpoint['optimizer'])
-            self.iter_num = checkpoint['iter_num']
-            
+            self.model = ViT(ViTConfig(**checkpoint["model_args"]))
+            self.model.load_state_dict(checkpoint["model"])
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
+            self.iter_num = checkpoint["iter_num"]
+
             # Restore RNG state
-            torch.set_rng_state(checkpoint['rng_state_pytorch'])
-            np.random.set_state(checkpoint['rng_state_numpy'])
-            
+            torch.set_rng_state(checkpoint["rng_state_pytorch"])
+            np.random.set_state(checkpoint["rng_state_numpy"])
+
             self.logger.info(f"Successfully loaded checkpoint from {checkpoint_path}")
             self.logger.info(f"Resuming from iteration {self.iter_num}")
-            
+
         except Exception as e:
             self.logger.error(f"Error loading checkpoint: {e}")
             raise
@@ -467,41 +459,48 @@ class Trainer:
         """Initialize the model architecture"""
         try:
             model_args = {
-                'image_size': self.settings.model.image_size,
-                'patch_size': self.settings.model.patch_size,
-                'n_layer': self.settings.model.n_layer,
-                'n_head': self.settings.model.n_head,
-                'n_embd': self.settings.model.n_embd,
-                'use_nViT': self.settings.model.use_nViT,
-                'dropout': self.settings.model.dropout,
-                'bias': self.settings.model.bias,
-                'num_classes': self.settings.model.num_classes
+                "image_size": self.settings.model.image_size,
+                "patch_size": self.settings.model.patch_size,
+                "n_layer": self.settings.model.n_layer,
+                "n_head": self.settings.model.n_head,
+                "n_embd": self.settings.model.n_embd,
+                "use_nViT": self.settings.model.use_nViT,
+                "dropout": self.settings.model.dropout,
+                "bias": self.settings.model.bias,
+                "num_classes": self.settings.model.num_classes,
+                "local_patch_size": self.settings.model.local_patch_size,
+                "global_patch_size": self.settings.model.global_patch_size,
+                "kohonen_nodes": self.settings.model.kohonen_nodes,
+                "kohonen_alpha": self.settings.model.kohonen_alpha,
+                "use_kohonen": self.settings.model.use_kohonen,
+                "reconstruction_weight": self.settings.model.reconstruction_weight,
+                "map_balance_weight": self.settings.model.map_balance_weight,
             }
 
-            if self.settings.training.init_from == 'scratch':
+            if self.settings.training.init_from == "scratch":
                 self.model = ViT(ViTConfig(**model_args))
-            elif self.settings.training.init_from == 'resume':
+            elif self.settings.training.init_from == "resume":
                 ckpt_path = Path(self.settings.data.checkpoint_dir) / self.settings.data.checkpoint_file
                 self.load_checkpoint(ckpt_path)
-            elif self.settings.training.init_from == 'wandb':
+            elif self.settings.training.init_from == "wandb":
                 self.load_from_wandb(self.settings.wandb.artifact_name)
             else:
                 raise ValueError(f"Invalid init_from value: {self.settings.training.init_from}")
-            
+
             self.model.to(self.device)
-            
+
             # First wrap with DDP if using distributed training
             if self.ddp and self.settings.system.use_ddp:
                 self.logger.info(f"Wrapping model with DDP on device {self.device}")
                 self.model = cast(ViT, DDP(
-                    self.model, 
+                    self.model,
                     device_ids=[self.ddp_local_rank],
                     output_device=self.ddp_local_rank,
                     broadcast_buffers=False,
                     find_unused_parameters=False,
-                    gradient_as_bucket_view=True  # Add this for better memory efficiency
+                    gradient_as_bucket_view=True,  # Add this for better memory efficiency
                 ))
-                
+
             # Then compile if enabled
             if self.settings.system.compile:
                 self.logger.info("Compiling model with torch.compile()")
@@ -522,7 +521,7 @@ class Trainer:
             return (x / x.norm(p=2, dim=idim, keepdim=True)).to(dtype=dtype)
 
         model_obj = self.get_module(cast(ViT, self.model))
-        
+
         # Normalize transformer blocks
         for block in model_obj.transformer.h:
             block.query.weight.data.copy_(justnorm(block.query.weight.data, 1))
@@ -537,7 +536,7 @@ class Trainer:
         """Estimate loss on train and validation sets"""
         out = {}
         self.model.eval()
-        for split, loader in [('train', self.train_loader), ('val', self.val_loader)]:
+        for split, loader in [("train", self.train_loader), ("val", self.val_loader)]:
             losses = torch.zeros(self.settings.training.eval_iters)
             for k, (X, y) in enumerate(loader):
                 if k >= self.settings.training.eval_iters:
@@ -550,16 +549,16 @@ class Trainer:
             out[split] = losses.mean()
         self.model.train()
         return out
-    
+
     def setup_wandb(self) -> None:
         """Initialize wandb logging"""
         if not self.master_process or self.settings.wandb.mode not in ["online", "offline"]:
             return
-        
+
         if self.settings.wandb.mode == "online":
             print(f"Logging to wandb with key: {self.settings.get('wandb_api_key', os.getenv('WANDB_API_KEY'))[:5]}...")
-            wandb.login(key=self.settings.get('wandb_api_key', os.getenv('WANDB_API_KEY')))  # loaded from secrets.yaml or environment variable NVIT_WANDB_API_KEY, or WANDB_API_KEY
-        
+            wandb.login(key=self.settings.get("wandb_api_key", os.getenv("WANDB_API_KEY")))  # loaded from secrets.yaml or environment variable NVIT_WANDB_API_KEY, or WANDB_API_KEY
+
         wandb_config = {
             "model_config": asdict(self.model.config),
             "training": self.settings.training,
@@ -573,7 +572,7 @@ class Trainer:
             name=f"{self.settings.wandb.run_name}_{time.strftime('%Y%m%d_%H%M%S')}",
             config=wandb_config,
         )
-        
+
         # Only watch the model if not using DDP or torch.compile
         if not self.ddp or (self.settings.system.use_ddp and not self.settings.system.compile):
             wandb.watch(
@@ -607,8 +606,7 @@ class Trainer:
 
     @torch.no_grad()
     def compute_accuracy(self, logits: torch.Tensor, targets: torch.Tensor) -> Tuple[float, float]:
-        """
-        Compute top-1 and top-5 accuracy
+        """Compute top-1 and top-5 accuracy
         """
         maxk = min(5, logits.size(1))  # top-5 or less if num_classes < 5
         batch_size = targets.size(0)
@@ -624,8 +622,7 @@ class Trainer:
 
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
-        """
-        Full validation loop with detailed metrics
+        """Full validation loop with detailed metrics
         """
         self.model.eval()
         val_loss = 0.0
@@ -635,13 +632,13 @@ class Trainer:
 
         for X, y in self.val_loader:
             X, y = X.to(self.device), y.to(self.device)
-            
+
             with self.ctx:
                 logits = self.model(X)
                 loss = F.cross_entropy(logits, y)
-                
+
             batch_top1, batch_top5 = self.compute_accuracy(logits, y)
-            
+
             val_loss += loss.item()
             top1_acc += batch_top1
             top5_acc += batch_top5
@@ -650,9 +647,9 @@ class Trainer:
         metrics = {
             "val/loss": val_loss / num_batches,
             "val/top1_accuracy": top1_acc / num_batches,
-            "val/top5_accuracy": top5_acc / num_batches
+            "val/top5_accuracy": top5_acc / num_batches,
         }
-        
+
         self.model.train()
         return metrics
 
@@ -660,45 +657,45 @@ class Trainer:
         """Save model checkpoint with improved metadata and wandb artifact handling"""
         if not self.master_process:
             return
-        
+
         tcheckpointsaving_begin = time.time()
         raw_model = self.get_module(self.model).module
-        
+
         # Format timestamp properly
-        timestamp = time.strftime('%d_%m_%Y-%Hh%Mm')
-        
+        timestamp = time.strftime("%d_%m_%Y-%Hh%Mm")
+
         checkpoint = {
-            'model': raw_model.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
-            'model_args': asdict(self.model.config),
-            'iter_num': iter_num,
-            'metrics': metrics,
-            'config': self.settings.to_dict(),
-            'rng_state_pytorch': rng_state_pytorch,
-            'rng_state_numpy': np.random.get_state(),
-            'timestamp': timestamp
+            "model": raw_model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "model_args": asdict(self.model.config),
+            "iter_num": iter_num,
+            "metrics": metrics,
+            "config": self.settings.to_dict(),
+            "rng_state_pytorch": rng_state_pytorch,
+            "rng_state_numpy": np.random.get_state(),
+            "timestamp": timestamp,
         }
 
         # Save latest checkpoint locally
-        latest_path = Path(self.settings.data.out_dir) / 'checkpoint_latest.pt'
+        latest_path = Path(self.settings.data.out_dir) / "checkpoint_latest.pt"
         torch.save(checkpoint, latest_path)
 
         # Handle best checkpoint
-        current_val_loss = metrics['val/loss']
-        is_best = current_val_loss < getattr(self, 'best_val_loss', float('inf'))
-        
+        current_val_loss = metrics["val/loss"]
+        is_best = current_val_loss < getattr(self, "best_val_loss", float("inf"))
+
         if is_best:
             self.best_val_loss = current_val_loss
-            
+
             # Save best checkpoint locally
-            best_path = Path(self.settings.data.out_dir) / 'checkpoint_best.pt'
+            best_path = Path(self.settings.data.out_dir) / "checkpoint_best.pt"
             torch.save(checkpoint, best_path)
-            
+
             # Save to wandb if enabled
             if wandb.run is not None:
                 # Create artifact name with timestamp
                 artifact_name = f"model-{self.settings.wandb.run_name}-{'nvit' if self.settings.model.use_nViT else 'vit'}-{timestamp}"
-                
+
                 # Create a wandb Artifact
                 artifact = wandb.Artifact(
                     name=artifact_name,
@@ -708,31 +705,31 @@ class Trainer:
                         "val_loss": current_val_loss,
                         "metrics": metrics,
                         "timestamp": timestamp,
-                        "using_nvit": self.settings.model.use_nViT
-                    }
+                        "using_nvit": self.settings.model.use_nViT,
+                    },
                 )
-                
+
                 # Add file to artifact
                 artifact.add_file(str(best_path))
-                
+
                 # Log artifact to wandb
                 wandb.log_artifact(artifact)
-                
+
                 # Delete old version if it exists
-                if hasattr(self, 'last_artifact_version') and self.last_artifact_version is not None:
+                if hasattr(self, "last_artifact_version") and self.last_artifact_version is not None:
                     try:
                         api = wandb.Api()
                         run = wandb.run
-                        
+
                         if run is None:
                             raise ValueError("Wandb run is not initialized")
-                        
+
                         old_artifact_name = f"{run.entity}/{run.project}/{self.last_artifact_version}"
                         artifact = api.artifact(old_artifact_name)
                         artifact.delete()
                     except Exception as e:
                         self.logger.info(f"Failed to delete old artifact: {e}")
-                
+
                 # Store new artifact name
                 self.last_artifact_version = artifact_name
 
@@ -740,64 +737,64 @@ class Trainer:
 
     def should_stop_early(self, val_loss: float) -> bool:
         """Check if training should stop early"""
-        if not hasattr(self, 'early_stopping_counter') or self.early_stopping_counter is None:
+        if not hasattr(self, "early_stopping_counter") or self.early_stopping_counter is None:
             self.early_stopping_counter = 0
-            self.best_val_loss = float('inf')
-        
+            self.best_val_loss = float("inf")
+
         if self.best_val_loss is None:
-            self.best_val_loss = float('inf')
-        
+            self.best_val_loss = float("inf")
+
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
             self.early_stopping_counter = 0
         else:
             self.early_stopping_counter += 1
-        
-        return (self.early_stopping_counter >= self.settings.training.early_stopping_patience 
-                if hasattr(self.settings.training, 'early_stopping_patience') else False)
+
+        return (self.early_stopping_counter >= self.settings.training.early_stopping_patience
+                if hasattr(self.settings.training, "early_stopping_patience") else False)
 
     def evaluate(self) -> Dict[str, float]:
         """Periodic evaluation with improved metrics"""
         rng_state_pytorch = torch.get_rng_state()
-        
+
         # Get detailed validation metrics
         val_metrics = self.validate()
-        train_loss = self.estimate_loss()['train']
-        
+        train_loss = self.estimate_loss()["train"]
+
         metrics = {
             "train/loss": train_loss,  # Changed from "train" to "train/loss"
-            "val/loss": val_metrics['val/loss'],
-            "val/top1_accuracy": val_metrics['val/top1_accuracy'],
-            "val/top5_accuracy": val_metrics['val/top5_accuracy'],
+            "val/loss": val_metrics["val/loss"],
+            "val/top1_accuracy": val_metrics["val/top1_accuracy"],
+            "val/top5_accuracy": val_metrics["val/top5_accuracy"],
             "optimizer/learning_rate": self.get_lr(self.iter_num) if self.settings.optimizer.decay_lr else self.settings.optimizer.learning_rate,
             "training/global_step": self.iter_num,
         }
-        
+
         # Store metrics for later use
         self.last_metrics = metrics.copy()
-        
+
         # Add model statistics
-        if hasattr(self.model, 'parameters'):
+        if hasattr(self.model, "parameters"):
             metrics["model/gradient_norm"] = self.compute_gradient_norm()
         metrics["model/parameter_norm"] = self.compute_parameter_norm()
-        
+
         # Log metrics to wandb
         if self.master_process:
             self.log_metrics(metrics)
-        
+
         # Check for early stopping
-        if self.should_stop_early(metrics['val/loss']):  # Updated key
+        if self.should_stop_early(metrics["val/loss"]):  # Updated key
             self.logger.info("Early stopping triggered!")
             self.mark_training_finished()
-        
+
         # Save checkpoint
         if self.settings.training.always_save_checkpoint and self.iter_num > 0:
             self.save_checkpoint(self.iter_num, metrics, rng_state_pytorch)
-        
+
         return metrics
 
     def compute_gradient_norm(self) -> float:
-        """Compute total gradient norm for all parameters"""
+        """Compute total gradient norm for all parameters."""
         total_norm = 0.0
         for p in self.model.parameters():
             if p.grad is not None:
@@ -812,39 +809,39 @@ class Trainer:
             param_norm = p.data.norm(2)
             total_norm += param_norm.item() ** 2
         return total_norm ** 0.5
-    
+
     def get_memory_usage(self) -> Dict[str, float]:
         if not self.settings.system.log_memory:
             return {}
-        
+
         """Get current memory usage statistics"""
         memory_stats = {
             "ram_used_gb": psutil.Process().memory_info().rss / (1024 * 1024 * 1024),
-            "ram_percent": psutil.virtual_memory().percent
+            "ram_percent": psutil.virtual_memory().percent,
         }
-        
+
         if torch.cuda.is_available():
             memory_stats.update({
                 "cuda_used_gb": torch.cuda.memory_allocated() / (1024 * 1024 * 1024),
-                "cuda_cached_gb": torch.cuda.memory_reserved() / (1024 * 1024 * 1024)
+                "cuda_cached_gb": torch.cuda.memory_reserved() / (1024 * 1024 * 1024),
             })
-        
+
         return memory_stats
 
     def train(self) -> None:
         """Main training loop"""
         try:
             tlaunch = time.time()
-            
+
             # Add debug logging for data loading
             self.logger.info("Setting up data loaders...")
             self.train_loader, self.val_loader = self.get_data_loaders()
             self.logger.info("Data loaders initialized successfully")
-            
+
             # Initialize wandb only on master process
             if self.master_process:
                 self.setup_wandb()
-            
+
             # Add synchronization point before training
             if self.ddp:
                 self.logger.info("Waiting for all processes at barrier before training...")
@@ -853,13 +850,13 @@ class Trainer:
 
             # Initialize progress bar if enabled
             if self.settings.system.use_tqdm and self.master_process:
-                pbar = tqdm(total=self.settings.training.max_iters, 
+                pbar = tqdm(total=self.settings.training.max_iters,
                            initial=self.iter_num,
                            desc="Training")
                 postfix: Dict[str, Union[str, float, int]] | None = OrderedDict({
-                    "loss": "+inf", 
-                    "lr": f"{self.settings.optimizer.learning_rate:.4e}", 
-                    "time_ms": "0.000"
+                    "loss": "+inf",
+                    "lr": f"{self.settings.optimizer.learning_rate:.4e}",
+                    "time_ms": "0.000",
                 })
             else:
                 pbar = None
@@ -868,15 +865,15 @@ class Trainer:
             # Initialize training state
             local_iter_num = 0
             t0 = time.time()
-            
+
             # Initialize stats file if starting from scratch
-            if self.master_process and self.settings.training.init_from == 'scratch':
+            if self.master_process and self.settings.training.init_from == "scratch":
                 stat_fname = Path(self.settings.data.out_dir) / "stat"
                 with open(stat_fname, "w") as f:
                     resstr = f"{0:.6e} {0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0:.4e} {0.0:.4e}"
                     resstr = resstr + self.get_hparams_str() + "\n"
                     f.write(resstr)
-            
+
             if self.iter_num == 0 and self.settings.training.eval_only:
                 self.evaluate()
 
@@ -887,11 +884,11 @@ class Trainer:
                    and self.iter_num < self.settings.training.max_iters
                    and time.time() - tlaunch < self.settings.training.time_limit_seconds
                    and not self.finished):
-                
+
                 # Set epoch for distributed sampler
                 if self.ddp:
-                    self.train_loader.sampler.set_epoch(current_epoch)  # type: ignore
-                
+                    self.train_loader.sampler.set_epoch(current_epoch)  # type: ignore[attr-defined]
+
                 # Set random seed for reproducibility
                 local_seed = 100 * self.iter_num + self.seed_offset
                 np.random.seed(local_seed)
@@ -901,52 +898,59 @@ class Trainer:
                 # Learning rate scheduling
                 lr = self.get_lr(self.iter_num) if self.settings.optimizer.decay_lr else self.settings.optimizer.learning_rate
                 for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = lr
-                    
+                    param_group["lr"] = lr
+
                 if self.iter_num % self.settings.training.eval_interval == 0 and self.master_process:
                     losses = self.evaluate()
-                    
+
                     # Write statistics
                     self.write_statistics(self.iter_num, lr, losses)
 
                 # Training step
                 for X, y in self.train_loader:
-                    if self.settings.system.device == 'cuda':
+                    if self.settings.system.device == "cuda":
                         X = X.pin_memory().to(self.device, non_blocking=True)
                         y = y.pin_memory().to(self.device, non_blocking=True)
                     else:
                         X, y = X.to(self.device), y.to(self.device)
 
-                    loss = torch.tensor(torch.inf, device=self.device)
+                    total_loss = torch.tensor(torch.inf, device=self.device)
                     for micro_step in range(self.settings.training.gradient_accumulation_steps):
                         if isinstance(self._model, DDP) and micro_step < self.settings.training.gradient_accumulation_steps - 1:
                             context = self._model.no_sync()
                         else:
                             context = nullcontext()
-                        
+
                         with context, self.ctx:
-                            logits = self.model(X)
-                            loss = F.cross_entropy(logits, y)
-                            loss = loss / self.settings.training.gradient_accumulation_steps
+                            logits, aux_losses = self.model(X)
+                            class_loss = F.cross_entropy(logits, y)
+                            total_loss = class_loss
+
+                            if self.model.config.use_kohonen:
+                                kohonen_loss = (aux_losses["kohonen_local"] + aux_losses["kohonen_global"]) / 2
+                                total_loss += self.model.config.map_balance_weight * kohonen_loss
+
+                            total_loss += self.model.config.reconstruction_weight * aux_losses["reconstruction"]
+                            total_loss = total_loss / self.settings.training.gradient_accumulation_steps
 
                         if self.scaler is not None:
-                            self.scaler.scale(loss).backward()
+                            self.scaler.scale(total_loss).backward()
                         else:
-                            loss.backward()
+                            total_loss.backward()
 
                     if self.settings.optimizer.grad_clip != 0.0:
                         if self.scaler is not None:
                             self.scaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.settings.optimizer.grad_clip)
-                    
+
                     if self.scaler is not None:
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
                     else:
                         self.optimizer.step()
-                        
+
                     self.optimizer.zero_grad(set_to_none=True)
-                    
+
                     # Update scheduler if it exists
                     if self.scheduler is not None:
                         self.scheduler.step()
@@ -955,23 +959,23 @@ class Trainer:
                     t1 = time.time()
                     dt = t1 - t0
                     t0 = t1
-                    
+
                     metrics = None
 
                     if self.iter_num % self.settings.training.log_interval == 0 and self.master_process:
                         memory_stats = self.get_memory_usage()
                         memory_metrics = {f"system/{k}": v for k, v in memory_stats.items()}
-                        
+
                         gpu_stats = self.log_gpu_stats()
                         gpu_metrics = {f"system/{k}": v for k, v in gpu_stats.items()}
-                        
+
                         # Garbage collection if memory usage is high
                         if self.settings.system.clear_cache and memory_stats.get("cuda_used_gb", 0) > 0.9 * torch.cuda.get_device_properties(self.device).total_memory:
                             gc.collect()
                             torch.cuda.empty_cache()
 
-                        lossf = loss.item() * self.settings.training.gradient_accumulation_steps
-                        
+                        lossf = total_loss.item() * self.settings.training.gradient_accumulation_steps
+
                         # Log training metrics
                         metrics = {
                             "train/iter": self.iter_num,
@@ -979,9 +983,9 @@ class Trainer:
                             "train/batch_time_ms": dt * 1000,
                             "optimizer/learning_rate": lr,
                             **memory_metrics,
-                            **gpu_metrics
+                            **gpu_metrics,
                         }
-                        
+
                         self.log_metrics(metrics)
 
                     if self.settings.model.use_nViT:
@@ -989,26 +993,22 @@ class Trainer:
 
                     self.iter_num += 1
                     local_iter_num += 1
-                    
+
                     # Update progress bar if enabled
                     if pbar is not None and self.master_process:
                         pbar.update(1)
                         postfix.update({"epoch": current_epoch})  # type: ignore
                         if metrics:
-                            postfix.update(**{  # type: ignore
-                                "loss": f"{metrics['train/batch_loss']:.4f}", 
-                                "lr": f"{metrics['optimizer/learning_rate']:.4e}", 
-                                "time_ms": f"{dt*1000:.1f}"
-                            })
+                            postfix.update(loss=f"{metrics['train/batch_loss']:.4f}", lr=f"{metrics['optimizer/learning_rate']:.4e}", time_ms=f"{dt*1000:.1f}")
                             metrics = None
                         pbar.set_postfix(ordered_dict=postfix)  # type: ignore
                     elif self.master_process and self.iter_num % self.settings.training.log_interval == 0:
                         # Log progress without tqdm
                         self.logger.info(
                             f"Iter: {self.iter_num}/{self.settings.training.max_iters} "
-                            f"Loss: {loss.item():.4f} "
+                            f"Loss: {total_loss.item():.4f} "
                             f"LR: {lr:.4e} "
-                            f"Time: {dt*1000:.1f}ms"
+                            f"Time: {dt*1000:.1f}ms",
                         )
 
                 current_epoch += 1
@@ -1033,7 +1033,7 @@ class Trainer:
             return self.settings.optimizer.learning_rate * iter_num / self.settings.optimizer.warmup_iters
         if iter_num > self.settings.optimizer.lr_decay_iters:
             return self.settings.optimizer.min_lr
-        
+
         decay_ratio = (iter_num - self.settings.optimizer.warmup_iters) / (
             self.settings.optimizer.lr_decay_iters - self.settings.optimizer.warmup_iters
         )
@@ -1047,11 +1047,11 @@ class Trainer:
         """Get hyperparameter string for logging"""
         if not self.settings.model.use_nViT:
             return ""
-        
+
         model_obj = self.get_module(cast(ViT, self.model))
-        
+
         resstr = f"{torch.mean(model_obj.module.sz * (self.settings.model.sz_init_value / self.settings.model.sz_init_scaling)):.5f} " if self.settings.model.use_nViT else "No sz, not using nViT"
-        
+
         for block in model_obj.transformer.h:
             sqk = block.sqk * (block.sqk_init_value/block.sqk_init_scaling)
             attn_alpha = block.attn_alpha * (block.attn_alpha_init_value / block.attn_alpha_init_scaling)
@@ -1062,13 +1062,13 @@ class Trainer:
             resstr += f"{torch.mean(attn_alpha):.5f} "
             resstr += f"{torch.mean(mlp_alpha):.5f} "
             resstr += f"{torch.mean(suv):.5f} "
-             
+
         return resstr
 
     def write_statistics(self, iter_num: int, lr: float, losses: Dict[str, float]) -> None:
         """Write training statistics to file"""
         stat_fname = Path(self.settings.data.out_dir) / "stat"
-        with open(stat_fname, "a" if self.settings.training.init_from == 'resume' else "w") as f:
+        with open(stat_fname, "a" if self.settings.training.init_from == "resume" else "w") as f:
             # Use the consistent keys
             resstr = f"{iter_num:.6e} {lr:.4e} {losses['train/loss']:.4e} {losses['val/loss']:.4e} "
             resstr += "0.0:.4e " * 9  # Placeholder values
@@ -1085,81 +1085,81 @@ class Trainer:
 
     def get_transforms(self) -> Tuple[transforms.Compose, transforms.Compose]:
         """Get dataset-specific transforms"""
-        if self.settings.data.dataset.lower() == 'imagenet':
+        if self.settings.data.dataset.lower() == "imagenet":
             train_transform = transforms.Compose([
                 transforms.RandomResizedCrop(self.settings.model.image_size),
                 transforms.RandomHorizontalFlip(),
                 transforms.ColorJitter(0.4, 0.4, 0.4),
                 transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                                std=[0.229, 0.224, 0.225])
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225]),
             ])
             val_transform = transforms.Compose([
                 transforms.Resize(256),
                 transforms.CenterCrop(self.settings.model.image_size),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                                std=[0.229, 0.224, 0.225])
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225]),
             ])
-        elif self.settings.data.dataset.lower() in ['cifar10', 'cifar100']:
+        elif self.settings.data.dataset.lower() in ["cifar10", "cifar100"]:
             train_transform = transforms.Compose([
                 transforms.RandomCrop(32, padding=4),
                 transforms.Resize(self.settings.model.image_size),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ])
             val_transform = transforms.Compose([
                 transforms.Resize(self.settings.model.image_size),
                 transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ])
         else:
             raise ValueError(f"Unsupported dataset: {self.settings.data.dataset}")
-        
+
         return train_transform, val_transform
 
     def setup_scheduler(self) -> None:
         """Setup learning rate scheduler based on settings"""
-        if not hasattr(self.settings.optimizer, 'scheduler'):
+        if not hasattr(self.settings.optimizer, "scheduler"):
             return
-        
-        if self.settings.optimizer.scheduler.type == 'cosine':
+
+        if self.settings.optimizer.scheduler.type == "cosine":
             scheduler = CosineAnnealingLR(
                 self.optimizer,
                 T_max=self.settings.optimizer.lr_decay_iters,
-                eta_min=self.settings.optimizer.min_lr
+                eta_min=self.settings.optimizer.min_lr,
             )
-        elif self.settings.optimizer.scheduler.type == 'reduce_on_plateau':
+        elif self.settings.optimizer.scheduler.type == "reduce_on_plateau":
             scheduler = ReduceLROnPlateau(
                 self.optimizer,
-                mode='min',
+                mode="min",
                 factor=self.settings.optimizer.scheduler.factor,
                 patience=self.settings.optimizer.scheduler.patience,
-                min_lr=self.settings.optimizer.min_lr
+                min_lr=self.settings.optimizer.min_lr,
             )
-        elif self.settings.optimizer.scheduler.type == 'linear':
+        elif self.settings.optimizer.scheduler.type == "linear":
             scheduler = LinearLR(
                 self.optimizer,
                 start_factor=1.0,
                 end_factor=self.settings.optimizer.min_lr / self.settings.optimizer.learning_rate,
-                total_iters=self.settings.optimizer.lr_decay_iters
+                total_iters=self.settings.optimizer.lr_decay_iters,
             )
         else:
             raise ValueError(f"Unknown scheduler type: {self.settings.optimizer.scheduler.type}")
-        
+
         if self.settings.optimizer.warmup_iters > 0:
             warmup_scheduler = LinearLR(
                 self.optimizer,
                 start_factor=0.0,
                 end_factor=1.0,
-                total_iters=self.settings.optimizer.warmup_iters
+                total_iters=self.settings.optimizer.warmup_iters,
             )
             self.scheduler = SequentialLR(
                 self.optimizer,  # type: ignore
                 schedulers=[warmup_scheduler, scheduler],
-                milestones=[self.settings.optimizer.warmup_iters]
+                milestones=[self.settings.optimizer.warmup_iters],
             )
         else:
             self.scheduler = scheduler  # type: ignore
@@ -1168,16 +1168,16 @@ class Trainer:
         """Log multi-GPU training statistics"""
         if not torch.cuda.is_available() or not self.ddp or not self.settings.system.use_ddp or not self.settings.system.log_gpu_stats:
             return {}
-        
+
         metrics = {}
         for i in range(torch.cuda.device_count()):
             gpu_stats = {
                 f"gpu_{i}/memory_used": torch.cuda.memory_allocated(i) / 1e9,
                 f"gpu_{i}/memory_cached": torch.cuda.memory_reserved(i) / 1e9,
-                f"gpu_{i}/utilization": torch.cuda.utilization(i)
+                f"gpu_{i}/utilization": torch.cuda.utilization(i),
             }
             metrics.update(gpu_stats)
-        
+
         return metrics
 
     def handle_error(self, error: Exception) -> None:
@@ -1190,7 +1190,7 @@ class Trainer:
                     "\t1. Reducing batch size\n"
                     "\t2. Reducing model size\n"
                     "\t3. Using gradient accumulation\n"
-                    "\t4. Using mixed precision training"
+                    "\t4. Using mixed precision training",
                 )
             elif "CUDA error" in str(error):
                 self.logger.error(
@@ -1198,7 +1198,7 @@ class Trainer:
                     "Try:\n"
                     "\t1. Checking GPU availability\n"
                     "\t2. Updating CUDA drivers\n"
-                    "\t3. Reducing model size"
+                    "\t3. Reducing model size",
                 )
         elif isinstance(error, ValueError):
             self.logger.error(f"Configuration error: {error}")
@@ -1216,20 +1216,20 @@ class Trainer:
         """Create a subset of validation data for quick evaluation"""
         if not self.settings.system.quick_validation:
             return self.val_loader
-        
+
         num_samples = num_samples or self.settings.system.quick_validation_size
         if len(self.val_loader.dataset) <= num_samples:  # type: ignore
             return self.val_loader
-        
+
         indices = torch.randperm(len(self.val_loader.dataset))[:num_samples]  # type: ignore
         subset_dataset = Subset(self.val_loader.dataset, indices)  # type: ignore
-        
+
         return DataLoader(
             subset_dataset,
             batch_size=self.settings.training.batch_size,
             shuffle=False,
             num_workers=self.settings.data.num_workers,
-            pin_memory=True if self.settings.system.device == 'cuda' else False
+            pin_memory=True if self.settings.system.device == "cuda" else False,
         )
 
 def main():
