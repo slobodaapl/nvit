@@ -12,6 +12,8 @@ training:
   max_iters_per_launch: 100000
   early_stopping_patience: 10
   save_numbered_checkpoints: false
+  consistency_weight: 0.1
+  smoothness_weight: 0.1
 
 optimizer:
   learning_rate: 0.0005
@@ -46,6 +48,13 @@ model:
   use_kohonen: true
   reconstruction_weight: 0.1
   map_balance_weight: 0.5
+  local_quantization_weight: 0.1
+  global_quantization_weight: 0.1
+  kohonen_scheduler:
+    enabled: true
+    warmup_steps: 1000
+    decay_steps: 10000
+    min_lr: 0.001
 
 system:
   device: "cuda"

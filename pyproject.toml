@@ -9,9 +9,11 @@ readme = "README.md"
 python = ">=3.8,<=3.11.9"
 torch = { version = "2.*", source = "pytorch-gpu" }
 torchvision = { version = "0.*", source = "pytorch-gpu" }
+matplotlib = "3.*"
 tqdm = "4.*"
 psutil = "6.*"
 einops = "0.*"
+loguru = "0.*"
 pydantic = "2.*"
 dynaconf = "3.*"
 wandb = ">=0.13.0,0.*"

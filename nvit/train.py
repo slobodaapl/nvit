@@ -475,6 +475,8 @@ class Trainer:
                 "use_kohonen": self.settings.model.use_kohonen,
                 "reconstruction_weight": self.settings.model.reconstruction_weight,
                 "map_balance_weight": self.settings.model.map_balance_weight,
+                "local_quantization_weight": self.settings.model.local_quantization_weight,
+                "global_quantization_weight": self.settings.model.global_quantization_weight,
             }
 
             if self.settings.training.init_from == "scratch":
@@ -505,6 +507,10 @@ class Trainer:
             if self.settings.system.compile:
                 self.logger.info("Compiling model with torch.compile()")
                 self.model = cast(ViT, torch.compile(self.model))
+
+            # Set total steps for learning rate scheduling
+            if hasattr(self.model, "total_steps"):
+                self.model.total_steps = self.settings.training.max_iters
 
         except Exception as e:
             self.logger.error(f"Failed to initialize model: {e}")
@@ -543,8 +549,15 @@ class Trainer:
                     break
                 X, y = X.to(self.device), y.to(self.device)
                 with self.ctx:
-                    logits = self.model(X)
+                    logits, aux_losses = self.model(X)
                     loss = F.cross_entropy(logits, y)
+                    if self.model.config.use_kohonen:
+                        loss += self.settings.training.consistency_weight * aux_losses["kohonen_consistency"]
+                        loss += self.settings.training.smoothness_weight * aux_losses["kohonen_smoothness"]
+                        loss += self.model.config.reconstruction_weight * aux_losses["reconstruction"]
+                        # Add quantization losses
+                        loss += self.model.config.local_quantization_weight * aux_losses["local_quantization"]
+                        loss += self.model.config.global_quantization_weight * aux_losses["global_quantization"]
                 losses[k] = loss.item()
             out[split] = losses.mean()
         self.model.train()
@@ -622,10 +635,13 @@ class Trainer:
 
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
-        """Full validation loop with detailed metrics
-        """
+        """Full validation loop with detailed metrics"""
         self.model.eval()
         val_loss = 0.0
+        consistency_loss = 0.0
+        smoothness_loss = 0.0
+        local_quant_loss = 0.0
+        global_quant_loss = 0.0
         top1_acc = 0.0
         top5_acc = 0.0
         num_batches = 0
@@ -634,8 +650,14 @@ class Trainer:
             X, y = X.to(self.device), y.to(self.device)
 
             with self.ctx:
-                logits = self.model(X)
+                logits, aux_losses = self.model(X)
                 loss = F.cross_entropy(logits, y)
+
+                if self.model.config.use_kohonen:
+                    consistency_loss += aux_losses["kohonen_consistency"].item()
+                    smoothness_loss += aux_losses["kohonen_smoothness"].item()
+                    local_quant_loss += aux_losses["local_quantization"].item()
+                    global_quant_loss += aux_losses["global_quantization"].item()
 
             batch_top1, batch_top5 = self.compute_accuracy(logits, y)
 
@@ -649,6 +671,14 @@ class Trainer:
             "val/top1_accuracy": top1_acc / num_batches,
             "val/top5_accuracy": top5_acc / num_batches,
         }
+
+        if self.model.config.use_kohonen:
+            metrics.update({
+                "val/consistency_loss": consistency_loss / num_batches,
+                "val/smoothness_loss": smoothness_loss / num_batches,
+                "val/local_quantization_loss": local_quant_loss / num_batches,
+                "val/global_quantization_loss": global_quant_loss / num_batches,
+            })
 
         self.model.train()
         return metrics
@@ -915,6 +945,11 @@ class Trainer:
                         X, y = X.to(self.device), y.to(self.device)
 
                     total_loss = torch.tensor(torch.inf, device=self.device)
+                    consistency_loss = torch.tensor(torch.inf, device=self.device)
+                    smoothness_loss = torch.tensor(torch.inf, device=self.device)
+                    local_quantization_loss = torch.tensor(torch.inf, device=self.device)
+                    global_quantization_loss = torch.tensor(torch.inf, device=self.device)
+
                     for micro_step in range(self.settings.training.gradient_accumulation_steps):
                         if isinstance(self._model, DDP) and micro_step < self.settings.training.gradient_accumulation_steps - 1:
                             context = self._model.no_sync()
@@ -927,10 +962,24 @@ class Trainer:
                             total_loss = class_loss
 
                             if self.model.config.use_kohonen:
-                                kohonen_loss = (aux_losses["kohonen_local"] + aux_losses["kohonen_global"]) / 2
-                                total_loss += self.model.config.map_balance_weight * kohonen_loss
+                                # Add consistency loss
+                                consistency_loss = aux_losses["kohonen_consistency"]
+                                total_loss += self.settings.training.consistency_weight * consistency_loss
 
-                            total_loss += self.model.config.reconstruction_weight * aux_losses["reconstruction"]
+                                # Add smoothness loss
+                                smoothness_loss = aux_losses["kohonen_smoothness"]
+                                total_loss += self.settings.training.smoothness_weight * smoothness_loss
+
+                                # Add quantization losses
+                                local_quantization_loss = aux_losses["local_quantization"]
+                                total_loss += self.model.config.local_quantization_weight * aux_losses["local_quantization"]
+
+                                global_quantization_loss = aux_losses["global_quantization"]
+                                total_loss += self.model.config.global_quantization_weight * aux_losses["global_quantization"]
+
+                                # Add reconstruction loss
+                                total_loss += self.model.config.reconstruction_weight * aux_losses["reconstruction"]
+
                             total_loss = total_loss / self.settings.training.gradient_accumulation_steps
 
                         if self.scaler is not None:
@@ -981,6 +1030,10 @@ class Trainer:
                             "train/iter": self.iter_num,
                             "train/batch_loss": lossf,
                             "train/batch_time_ms": dt * 1000,
+                            "train/consistency_loss": consistency_loss.item() if self.model.config.use_kohonen else 0.0,
+                            "train/smoothness_loss": smoothness_loss.item() if self.model.config.use_kohonen else 0.0,
+                            "train/local_quantization_loss": local_quantization_loss.item() if self.model.config.use_kohonen else 0.0,
+                            "train/global_quantization_loss": global_quantization_loss.item() if self.model.config.use_kohonen else 0.0,
                             "optimizer/learning_rate": lr,
                             **memory_metrics,
                             **gpu_metrics,

@@ -128,10 +128,12 @@ class KohonenMap(nn.Module):
         if not self.training:
             return
 
-        batch_size = x.size(0)
+        # Ensure winning_indices is 1D and matches batch size
+        if winning_indices.dim() > 1:
+            winning_indices = winning_indices.reshape(-1)
 
         # Get BMU locations
-        bmu_locs = self.locations[winning_indices].view(batch_size, 2)
+        bmu_locs = self.locations[winning_indices]
 
         for bmu_loc, input_vec in zip(bmu_locs, x):
             # Calculate neighborhood distances
@@ -141,7 +143,22 @@ class KohonenMap(nn.Module):
             neighborhood = torch.exp(-neighborhood_distances / (2 * self.sigma * self.sigma))
 
             # Calculate update strength
-            update_strength = learning_rate * self.alpha * neighborhood.unsqueeze(1)
+            update_strength = learning_rate * self.alpha * neighborhood
+
+            # Ensure input_vec matches node dimensions
+            input_size = input_vec.numel()  # Get total number of elements
+            target_size = self.nodes.size(1)
+
+            if input_size > target_size:
+                # If input is larger, average pool to match target size
+                input_vec = input_vec.reshape(-1)
+                input_vec = input_vec.view(-1, input_size // target_size).mean(dim=1)
+            elif input_size < target_size:
+                # If input is smaller, upsample to match target size
+                input_vec = input_vec.reshape(-1)
+                input_vec = input_vec.repeat(target_size // input_size)
+            else:
+                input_vec = input_vec.reshape(-1)
 
             # Update nodes
             delta = input_vec.unsqueeze(0) - self.nodes

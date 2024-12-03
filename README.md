@@ -59,4 +59,103 @@ Key features:
 
 The code is kept simple and readable to serve as a reference implementation for normalized Vision Transformers.
 
+### **Theoretical Background**
+
+The nViT (normalized Vision Transformer) builds upon the principles of nGPT, extending the concept of normalized representations to vision transformers. The key insight is mapping all representations to a unit hypersphere, facilitating meaningful distance computations and token comparisons.
+
+#### **Core Concepts**
+
+1. **Normalized Representations**
+   - All feature vectors are normalized to unit length: $\|x\|_2 = 1$
+   - Enables direct comparison using dot products as a similarity measure
+   - Distances on the hypersphere correspond to semantic relationships
+
+2. **Kohonen Maps as Visual Vocabulary**
+   - Unlike language models, vision transformers lack a discrete token vocabulary
+   - Kohonen Self-Organizing Maps (SOMs) create a continuous, trainable visual vocabulary
+   - Each map node $M_i$ represents a prototype patch on the unit hypersphere
+   - Topological preservation ensures similar features are mapped to nearby nodes
+
+3. **Dual-Path Processing**
+   - Local patches (8×8): $P_l$ captures fine-grained details
+   - Global patches (16×16): $P_g$ captures broader context
+   - Cross-attention mechanism: $C(P_l, P_g)$ integrates multi-scale information
+
+#### **Loss Functions**
+
+The training objective combines several losses with adjustable weights:
+
+1. **Main Classification Loss**
+   
+   $\mathcal{L}_{cls} = \text{CrossEntropy}(f(x), y)$
+
+2. **Quantization Loss**
+   - Ensures mapped representations stay close to original patches
+   
+   $\mathcal{L}_{quant} = \lambda_{lq} \|K_l(P_l) - P_l\|_2^2 + \lambda_{gq} \|K_g(P_g) - P_g\|_2^2$
+   
+   where $K_l$ and $K_g$ are local and global Kohonen maps
+   $\lambda_{lq} = \lambda_{gq} = 0.1$ (default weights)
+
+3. **Consistency Loss**
+   - Aligns local and global representations
+   
+   $\mathcal{L}_{cons} = \lambda_c (1 - \cos(K_l(P_l), K_g(P_g)))$
+   
+   where $\cos(a,b)$ is cosine similarity
+   $\lambda_c = 0.5$ (default weight)
+
+4. **Smoothness Loss**
+   - Maintains topological organization of Kohonen maps
+   
+   $\mathcal{L}_{smooth} = \lambda_s (\|\nabla K_l\|_2^2 + \|\nabla K_g\|_2^2)$
+   
+   where $\nabla K$ represents neighborhood differences
+   $\lambda_s = 0.1$ (default weight)
+
+5. **Reconstruction Loss**
+   - Ensures preservation of spatial information
+   
+   $\mathcal{L}_{rec} = \lambda_r \|\text{Dec}(\text{Enc}(x)) - x\|_2^2$
+   
+   $\lambda_r = 0.1$ (default weight)
+
+#### **Combined Training Objective**
+
+The final loss combines all components:
+
+$\mathcal{L}_{total} = \mathcal{L}_{cls} + \mathcal{L}_{quant} + \mathcal{L}_{cons} + \mathcal{L}_{smooth} + \mathcal{L}_{rec}$
+
+#### **Training Dynamics**
+
+1. **Kohonen Map Learning**
+   - Learning rate follows a cosine schedule with warmup
+   - $\alpha(t) = \alpha_{max} \cos(\pi t/T)$ after warmup
+   - Nodes are updated using neighborhood function:
+     
+     $M_i \leftarrow M_i + \alpha(t)h(i,j)(x - M_i)$
+     
+     where $h(i,j)$ is the neighborhood function
+
+2. **Cross-Attention Integration**
+   - Local and global features are combined through cross-attention
+   - Attention weights are computed on normalized representations:
+     
+     $A = \text{softmax}(Q_l K_g^T / \sqrt{d})$
+   - Output preserves unit norm through final normalization
+
+3. **Representation Flow**
+   ```
+   Input Image → Local/Global Patches → Kohonen Mapping →
+   Cross-Attention → Transformer Blocks → Classification
+   ```
+
+This framework effectively combines the benefits of:
+- Normalized representations (from nGPT)
+- Continuous visual vocabulary (via Kohonen maps)
+- Multi-scale feature processing (through dual-path architecture)
+- Self-supervised learning (via reconstruction)
+
+The result is a vision transformer that maintains interpretable, normalized representations throughout its processing pipeline while capturing both local and global visual patterns.
+
 ---

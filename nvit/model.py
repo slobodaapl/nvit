@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 import torch
@@ -32,11 +32,17 @@ class ViTConfig:
     use_kohonen: bool = True
     reconstruction_weight: float = 0.1
     map_balance_weight: float = 0.5  # Learnable weight between local/global maps
+    kohonen_scheduler_enabled: bool = True
+    kohonen_scheduler_warmup_steps: int = 1000
+    kohonen_scheduler_decay_steps: int = 10000
+    kohonen_scheduler_min_lr: float = 0.001
+    local_quantization_weight: float = 0.1
+    global_quantization_weight: float = 0.1
 
 
 class Block(nn.Module):
 
-    def __init__(self, config: ViTConfig, iblock: int) -> None:
+    def __init__(self, config: ViTConfig) -> None:
         super(Block, self).__init__()
         self.config = config
 
@@ -210,6 +216,8 @@ class ViT(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
         self.config = config
+        self.step = 0  # Current training step
+        self.total_steps = 0  # Total training steps
 
         # Local patch embedding (no padding needed)
         self.local_patch_embed = nn.Conv2d(
@@ -242,12 +250,12 @@ class ViT(nn.Module):
             self.local_kohonen = KohonenMap(
                 config.n_embd,
                 config.kohonen_nodes // 2,
-                config.kohonen_alpha,
+                config.kohonen_alpha if not config.kohonen_scheduler_enabled else config.kohonen_scheduler_min_lr,
             )
             self.global_kohonen = KohonenMap(
                 config.n_embd,
                 config.kohonen_nodes // 2,
-                config.kohonen_alpha,
+                config.kohonen_alpha if not config.kohonen_scheduler_enabled else config.kohonen_scheduler_min_lr,
             )
             self.map_balance = nn.Parameter(torch.tensor(config.map_balance_weight))
 
@@ -263,7 +271,7 @@ class ViT(nn.Module):
         # Transformer blocks
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config, il) for il in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
         ))
 
         # Output head
@@ -330,6 +338,8 @@ class ViT(nn.Module):
         return mfu, flops_achieved
 
     def forward(self, img: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if self.training:
+            self.step += 1
         # Get local and global patches
         local_patches = self.local_patch_embed(img)  # No padding needed
         global_patches = self.global_patch_embed(img)  # Includes reflection padding
@@ -345,7 +355,7 @@ class ViT(nn.Module):
 
         if self.config.use_kohonen:
             # Apply Kohonen maps with current learning rate
-            lr = self.scheduler(self.step, self.total_steps) if hasattr(self, "scheduler") else 1.0
+            lr = self.get_kohonen_lr(self.step)
 
             # Process local and global features
             local_repr, local_indices = self.local_kohonen(local_patches)
@@ -356,13 +366,17 @@ class ViT(nn.Module):
                 self.local_kohonen.update_nodes(local_patches, local_indices, lr)
                 self.global_kohonen.update_nodes(global_patches, global_indices, lr)
 
-            # Combine representations using learnable balance
-            balance_weight = torch.sigmoid(self.map_balance)
-            patches = balance_weight * local_repr + (1 - balance_weight) * global_repr
+            # Use the Kohonen representations instead of original patches
+            patches = self.cross_attention(local_repr, global_repr)
+            
+            # Compute additional losses
+            aux_losses["kohonen_consistency"] = self.compute_consistency_loss(local_repr, global_repr)
+            aux_losses["kohonen_smoothness"] = self.compute_smoothness_loss(local_indices, global_indices)
+            
+            # Add quantization losses to ensure representations stay close to original patches
+            aux_losses["local_quantization"] = F.mse_loss(local_repr, local_patches)
+            aux_losses["global_quantization"] = F.mse_loss(global_repr, global_patches)
 
-            # Calculate Kohonen map losses
-            aux_losses["kohonen_local"] = F.mse_loss(local_repr, local_patches)
-            aux_losses["kohonen_global"] = F.mse_loss(global_repr, global_patches)
         else:
             # Without Kohonen maps, use cross attention directly
             patches = self.cross_attention(local_patches, global_patches)
@@ -377,12 +391,11 @@ class ViT(nn.Module):
 
         # Reconstruction loss
         reconstructed = self.reconstruction_head(patches)
-        aux_losses["reconstruction"] = F.mse_loss(
-            reconstructed,
-            img.unfold(2, self.config.local_patch_size, self.config.local_patch_size)
-               .unfold(3, self.config.local_patch_size, self.config.local_patch_size)
-               .flatten(1, 2),
-        )
+        target = img.unfold(2, self.config.local_patch_size, self.config.local_patch_size) \
+                   .unfold(3, self.config.local_patch_size, self.config.local_patch_size) \
+                   .permute(0, 2, 3, 1, 4, 5) \
+                   .reshape(reconstructed.shape)
+        aux_losses["reconstruction"] = F.mse_loss(reconstructed, target)
 
         if self.config.use_nViT == 1:
             sz = self.sz * (self.config.sz_init_value / self.config.sz_init_scaling)
@@ -394,3 +407,110 @@ class ViT(nn.Module):
     def num_params(self) -> int:
         """Return number of parameters in the model"""
         return sum(p.numel() for p in self.parameters())
+
+    def combine_representations(self, local_repr: torch.Tensor, global_repr: torch.Tensor) -> torch.Tensor:
+        # Element-wise product followed by normalization
+        combined = local_repr * global_repr
+        return combined / combined.norm(p=2, dim=-1, keepdim=True)
+
+    def compute_consistency_loss(self, local_repr: torch.Tensor, global_repr: torch.Tensor) -> torch.Tensor:
+        """Compute consistency loss between local and global representations"""
+        # Normalize both representations
+        local_norm = local_repr / local_repr.norm(p=2, dim=-1, keepdim=True)
+        global_norm = global_repr / global_repr.norm(p=2, dim=-1, keepdim=True)
+        
+        # Compute cosine similarity
+        consistency = (local_norm * global_norm).sum(dim=-1)
+        return 1.0 - consistency.mean()
+
+    def compute_smoothness_loss(self, local_indices: torch.Tensor, global_indices: torch.Tensor) -> torch.Tensor:
+        """Compute smoothness loss for map transitions"""
+        # Get neighboring indices
+        local_neighbors = self.get_neighbor_indices(local_indices)
+        global_neighbors = self.get_neighbor_indices(global_indices)
+        
+        # Compute smoothness for both maps
+        local_smoothness = self.compute_map_smoothness(local_indices, local_neighbors, is_local=True)
+        global_smoothness = self.compute_map_smoothness(global_indices, global_neighbors, is_local=False)
+        
+        return local_smoothness + global_smoothness
+
+    def get_neighbor_indices(self, indices: torch.Tensor) -> torch.Tensor:
+        """Get neighboring indices for each index in the Kohonen map"""
+        nodes_per_map = self.config.kohonen_nodes // 2
+        map_size = int(math.sqrt(nodes_per_map))
+        
+        if map_size * map_size != nodes_per_map:
+            raise ValueError(
+                f"Number of nodes per map ({nodes_per_map}) must be a perfect square. "
+                f"Got {self.config.kohonen_nodes} total nodes."
+            )
+        
+        # Convert linear indices to 2D coordinates
+        row = (indices // map_size).unsqueeze(-1)  # Shape: (batch_size, num_indices, 1)
+        col = (indices % map_size).unsqueeze(-1)   # Shape: (batch_size, num_indices, 1)
+        
+        # Get neighbor coordinates (8-neighborhood)
+        neighbor_offsets = torch.tensor([
+            [-1, -1], [-1, 0], [-1, 1],
+            [0, -1],           [0, 1],
+            [1, -1],  [1, 0],  [1, 1]
+        ], device=indices.device)  # Shape: (8, 2)
+        
+        # Expand coordinates to match neighbor dimensions
+        row = row.expand(-1, -1, 8)  # Shape: (batch_size, num_indices, 8)
+        col = col.expand(-1, -1, 8)  # Shape: (batch_size, num_indices, 8)
+        
+        # Add offsets to current coordinates
+        neighbor_rows = (row + neighbor_offsets[:, 0].view(1, 1, -1)) % map_size  # Shape: (batch_size, num_indices, 8)
+        neighbor_cols = (col + neighbor_offsets[:, 1].view(1, 1, -1)) % map_size  # Shape: (batch_size, num_indices, 8)
+        
+        # Convert back to linear indices
+        neighbor_indices = neighbor_rows * map_size + neighbor_cols
+        
+        return neighbor_indices
+
+    def compute_map_smoothness(self, indices: torch.Tensor, neighbor_indices: torch.Tensor, is_local: bool = True) -> torch.Tensor:
+        """Compute smoothness loss for a Kohonen map
+        Args:
+            indices: Tensor of shape (batch_size, num_indices) containing BMU indices
+            neighbor_indices: Tensor of shape (batch_size, num_indices, num_neighbors) containing neighbor indices
+            is_local: Whether to use local or global Kohonen map
+        Returns:
+            Scalar smoothness loss
+        """
+        # Use correct map
+        kohonen_map = self.local_kohonen if is_local else self.global_kohonen
+        
+        # Get embeddings for current indices and their neighbors
+        current_embeddings = kohonen_map.nodes[indices]  # Shape: (batch_size, num_indices, embd_dim)
+        neighbor_embeddings = kohonen_map.nodes[neighbor_indices]  # Shape: (batch_size, num_indices, num_neighbors, embd_dim)
+        
+        # Compute average distance to neighbors
+        distances = torch.norm(
+            current_embeddings.unsqueeze(2) - neighbor_embeddings,
+            p=2, dim=-1
+        )
+        
+        return distances.mean()
+
+    def get_kohonen_lr(self, step: int) -> float:
+        """Get current learning rate for Kohonen maps"""
+        if not self.config.kohonen_scheduler_enabled:
+            return self.config.kohonen_alpha
+
+        warmup_steps = self.config.kohonen_scheduler_warmup_steps
+        decay_steps = self.config.kohonen_scheduler_decay_steps
+        min_lr = self.config.kohonen_scheduler_min_lr
+        max_lr = self.config.kohonen_alpha
+
+        if step < warmup_steps:
+            # Linear warmup
+            return min_lr + (max_lr - min_lr) * (step / warmup_steps)
+        elif step > decay_steps:
+            return min_lr
+        else:
+            # Cosine decay
+            decay_ratio = (step - warmup_steps) / (decay_steps - warmup_steps)
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+            return min_lr + coeff * (max_lr - min_lr)
