@@ -5,8 +5,8 @@ training:
   eval_only: false
   always_save_checkpoint: true
   init_from: "scratch"
-  gradient_accumulation_steps: 16
-  batch_size: 8
+  gradient_accumulation_steps: 8
+  batch_size: 512
   max_iters: 100000
   time_limit_seconds: 86400
   max_iters_per_launch: 100000

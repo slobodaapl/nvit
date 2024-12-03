@@ -14,9 +14,8 @@ if (Test-Path .env) {
     }
 }
 
-# Get current user's UID and GID
-$USER_ID = (Get-WmiObject -Class Win32_UserAccount -Filter "Name = '$env:USERNAME'").SID
-$GROUP_ID = (Get-WmiObject -Class Win32_Group -Filter "Name = 'Users'").SID
+New-Item -ItemType Directory -Force -Path "out" | Out-Null
+icacls "out" /grant Everyone:F /T
 
 # Build docker run command
 $docker_cmd = "docker run --rm"
@@ -34,6 +33,5 @@ Invoke-Expression "$docker_cmd ``
     -e NCCL_TIMEOUT=1200 ``
     -e NCCL_DEBUG=INFO ``
     --env-file .env ``
-    --user ${USER_ID}:${GROUP_ID} ``
     nvit:latest ``
     torchrun --nnodes 1 --nproc_per_node $num_gpus --rdzv_endpoint=localhost:29501 nvit/train.py"

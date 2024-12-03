@@ -48,7 +48,6 @@ class MockDPPModel(ViT):
 
 
 class Trainer:
-
     @functools.cached_property
     def ddp(self) -> bool:
         return int(os.environ.get("RANK", -1)) != -1
@@ -66,8 +65,7 @@ class Trainer:
         return Model(config, transformer, module)
 
     @property
-    def model(self) -> ViT:
-        ...
+    def model(self) -> ViT: ...
 
     @model.setter
     def model(self, value: ViT) -> None:
@@ -143,7 +141,9 @@ class Trainer:
             handlers=[
                 logging.StreamHandler(),
                 logging.FileHandler(Path(self.settings.data.out_dir) / "training.log"),
-            ] if self.master_process else [logging.StreamHandler()],
+            ]
+            if self.master_process
+            else [logging.StreamHandler()],
         )
         self.logger = logging.getLogger(__name__)
 
@@ -203,9 +203,7 @@ class Trainer:
         try:
             # Add debug logging
             self.logger.info("Initializing distributed training...")
-            self.logger.info(f"Environment variables: RANK={os.environ.get('RANK')}, "
-                            f"LOCAL_RANK={os.environ.get('LOCAL_RANK')}, "
-                            f"WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
+            self.logger.info(f"Environment variables: RANK={os.environ.get('RANK')}, LOCAL_RANK={os.environ.get('LOCAL_RANK')}, WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
 
             self.ddp_rank = int(os.environ["RANK"])
             self.ddp_local_rank = int(os.environ["LOCAL_RANK"])
@@ -249,10 +247,7 @@ class Trainer:
             "float16": torch.float16,
         }[self.settings.system.dtype]
 
-        self.ctx = (
-            nullcontext() if device_type == "cpu" or not self.settings.system.use_amp
-            else autocast(device_type=device_type, dtype=ptdtype)
-        )
+        self.ctx = nullcontext() if device_type == "cpu" or not self.settings.system.use_amp else autocast(device_type=device_type, dtype=ptdtype)
 
     def get_data_loaders(self) -> Tuple[DataLoader, DataLoader]:
         """Initialize and return training and validation data loaders"""
@@ -266,14 +261,18 @@ class Trainer:
 
             if self.settings.data.dataset.lower() == "imagenet":
                 # Base transforms for ImageNet
-                train_transform_list.extend([
-                    transforms.RandomResizedCrop(self.settings.model.image_size),
-                    transforms.RandomHorizontalFlip(),
-                ])
-                val_transform_list.extend([
-                    transforms.Resize(256),
-                    transforms.CenterCrop(self.settings.model.image_size),
-                ])
+                train_transform_list.extend(
+                    [
+                        transforms.RandomResizedCrop(self.settings.model.image_size),
+                        transforms.RandomHorizontalFlip(),
+                    ],
+                )
+                val_transform_list.extend(
+                    [
+                        transforms.Resize(256),
+                        transforms.CenterCrop(self.settings.model.image_size),
+                    ],
+                )
 
                 # Normalization values for ImageNet
                 normalize = transforms.Normalize(
@@ -283,14 +282,18 @@ class Trainer:
 
             elif self.settings.data.dataset.lower() in ["cifar10", "cifar100"]:
                 # Base transforms for CIFAR
-                train_transform_list.extend([
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.Resize(self.settings.model.image_size),
-                    transforms.RandomHorizontalFlip(),
-                ])
-                val_transform_list.extend([
-                    transforms.Resize(self.settings.model.image_size),
-                ])
+                train_transform_list.extend(
+                    [
+                        transforms.RandomCrop(32, padding=4),
+                        transforms.Resize(self.settings.model.image_size),
+                        transforms.RandomHorizontalFlip(),
+                    ],
+                )
+                val_transform_list.extend(
+                    [
+                        transforms.Resize(self.settings.model.image_size),
+                    ],
+                )
 
                 # Normalization values for CIFAR
                 normalize = transforms.Normalize(
@@ -348,29 +351,27 @@ class Trainer:
                     root="./data",
                     split="train",
                     transform=train_transform,
-                    download=self.master_process, # Only download on main node
+                    download=self.master_process,  # Only download on main node
                 )
                 valset = torchvision.datasets.ImageNet(
                     root="./data",
                     split="val",
                     transform=val_transform,
-                    download=self.master_process, # Only download on main node
+                    download=self.master_process,  # Only download on main node
                 )
             else:  # CIFAR10 or CIFAR100
-                dataset_class = (torchvision.datasets.CIFAR10
-                               if self.settings.data.dataset.lower() == "cifar10"
-                               else torchvision.datasets.CIFAR100)
+                dataset_class = torchvision.datasets.CIFAR10 if self.settings.data.dataset.lower() == "cifar10" else torchvision.datasets.CIFAR100
 
                 trainset = dataset_class(
                     root="./data",
                     train=True,
-                    download=self.master_process, # Only download on main node
+                    download=self.master_process,  # Only download on main node
                     transform=train_transform,
                 )
                 valset = dataset_class(
                     root="./data",
                     train=False,
-                    download=self.master_process, # Only download on main node
+                    download=self.master_process,  # Only download on main node
                     transform=val_transform,
                 )
 
@@ -378,20 +379,28 @@ class Trainer:
                 raise ValueError(f"Dataset {self.settings.data.dataset} not properly initialized")
 
             # Create samplers for distributed training
-            train_sampler = DistributedSampler(
-                trainset,
-                num_replicas=self.ddp_world_size if self.ddp else 1,
-                rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
-                shuffle=True,
-                seed=self.settings.training.seed if hasattr(self.settings.training, "seed") else 42,
-            ) if self.ddp else None
+            train_sampler = (
+                DistributedSampler(
+                    trainset,
+                    num_replicas=self.ddp_world_size if self.ddp else 1,
+                    rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
+                    shuffle=True,
+                    seed=self.settings.training.seed if hasattr(self.settings.training, "seed") else 42,
+                )
+                if self.ddp
+                else None
+            )
 
-            val_sampler = DistributedSampler(
-                valset,
-                num_replicas=self.ddp_world_size if self.ddp else 1,
-                rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
-                shuffle=False,
-            ) if self.ddp and not self.settings.system.use_ddp else None
+            val_sampler = (
+                DistributedSampler(
+                    valset,
+                    num_replicas=self.ddp_world_size if self.ddp else 1,
+                    rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
+                    shuffle=False,
+                )
+                if self.ddp and not self.settings.system.use_ddp
+                else None
+            )
 
             # Create data loaders with appropriate samplers
             train_loader = DataLoader(
@@ -460,7 +469,6 @@ class Trainer:
         try:
             model_args = {
                 "image_size": self.settings.model.image_size,
-                "patch_size": self.settings.model.patch_size,
                 "n_layer": self.settings.model.n_layer,
                 "n_head": self.settings.model.n_head,
                 "n_embd": self.settings.model.n_embd,
@@ -479,6 +487,8 @@ class Trainer:
                 "global_quantization_weight": self.settings.model.global_quantization_weight,
             }
 
+            self.logger.info(f"Model args: {model_args}")
+
             if self.settings.training.init_from == "scratch":
                 self.model = ViT(ViTConfig(**model_args))
             elif self.settings.training.init_from == "resume":
@@ -494,14 +504,17 @@ class Trainer:
             # First wrap with DDP if using distributed training
             if self.ddp and self.settings.system.use_ddp:
                 self.logger.info(f"Wrapping model with DDP on device {self.device}")
-                self.model = cast(ViT, DDP(
-                    self.model,
-                    device_ids=[self.ddp_local_rank],
-                    output_device=self.ddp_local_rank,
-                    broadcast_buffers=False,
-                    find_unused_parameters=False,
-                    gradient_as_bucket_view=True,  # Add this for better memory efficiency
-                ))
+                self.model = cast(
+                    ViT,
+                    DDP(
+                        self.model,
+                        device_ids=[self.ddp_local_rank],
+                        output_device=self.ddp_local_rank,
+                        broadcast_buffers=False,
+                        find_unused_parameters=False,
+                        gradient_as_bucket_view=True,  # Add this for better memory efficiency
+                    ),
+                )
 
             # Then compile if enabled
             if self.settings.system.compile:
@@ -619,8 +632,7 @@ class Trainer:
 
     @torch.no_grad()
     def compute_accuracy(self, logits: torch.Tensor, targets: torch.Tensor) -> Tuple[float, float]:
-        """Compute top-1 and top-5 accuracy
-        """
+        """Compute top-1 and top-5 accuracy"""
         maxk = min(5, logits.size(1))  # top-5 or less if num_classes < 5
         batch_size = targets.size(0)
 
@@ -673,12 +685,14 @@ class Trainer:
         }
 
         if self.model.config.use_kohonen:
-            metrics.update({
-                "val/consistency_loss": consistency_loss / num_batches,
-                "val/smoothness_loss": smoothness_loss / num_batches,
-                "val/local_quantization_loss": local_quant_loss / num_batches,
-                "val/global_quantization_loss": global_quant_loss / num_batches,
-            })
+            metrics.update(
+                {
+                    "val/consistency_loss": consistency_loss / num_batches,
+                    "val/smoothness_loss": smoothness_loss / num_batches,
+                    "val/local_quantization_loss": local_quant_loss / num_batches,
+                    "val/global_quantization_loss": global_quant_loss / num_batches,
+                },
+            )
 
         self.model.train()
         return metrics
@@ -780,8 +794,7 @@ class Trainer:
         else:
             self.early_stopping_counter += 1
 
-        return (self.early_stopping_counter >= self.settings.training.early_stopping_patience
-                if hasattr(self.settings.training, "early_stopping_patience") else False)
+        return self.early_stopping_counter >= self.settings.training.early_stopping_patience if hasattr(self.settings.training, "early_stopping_patience") else False
 
     def evaluate(self) -> Dict[str, float]:
         """Periodic evaluation with improved metrics"""
@@ -830,7 +843,7 @@ class Trainer:
             if p.grad is not None:
                 param_norm = p.grad.data.norm(2)
                 total_norm += param_norm.item() ** 2
-        return total_norm ** 0.5
+        return total_norm**0.5
 
     def compute_parameter_norm(self) -> float:
         """Compute total parameter norm"""
@@ -838,7 +851,7 @@ class Trainer:
         for p in self.model.parameters():
             param_norm = p.data.norm(2)
             total_norm += param_norm.item() ** 2
-        return total_norm ** 0.5
+        return total_norm**0.5
 
     def get_memory_usage(self) -> Dict[str, float]:
         if not self.settings.system.log_memory:
@@ -851,10 +864,12 @@ class Trainer:
         }
 
         if torch.cuda.is_available():
-            memory_stats.update({
-                "cuda_used_gb": torch.cuda.memory_allocated() / (1024 * 1024 * 1024),
-                "cuda_cached_gb": torch.cuda.memory_reserved() / (1024 * 1024 * 1024),
-            })
+            memory_stats.update(
+                {
+                    "cuda_used_gb": torch.cuda.memory_allocated() / (1024 * 1024 * 1024),
+                    "cuda_cached_gb": torch.cuda.memory_reserved() / (1024 * 1024 * 1024),
+                },
+            )
 
         return memory_stats
 
@@ -880,14 +895,14 @@ class Trainer:
 
             # Initialize progress bar if enabled
             if self.settings.system.use_tqdm and self.master_process:
-                pbar = tqdm(total=self.settings.training.max_iters,
-                           initial=self.iter_num,
-                           desc="Training")
-                postfix: Dict[str, Union[str, float, int]] | None = OrderedDict({
-                    "loss": "+inf",
-                    "lr": f"{self.settings.optimizer.learning_rate:.4e}",
-                    "time_ms": "0.000",
-                })
+                pbar = tqdm(total=self.settings.training.max_iters, initial=self.iter_num, desc="Training")
+                postfix: Dict[str, Union[str, float, int]] | None = OrderedDict(
+                    {
+                        "loss": "+inf",
+                        "lr": f"{self.settings.optimizer.learning_rate:.4e}",
+                        "time_ms": "0.000",
+                    },
+                )
             else:
                 pbar = None
                 postfix = None
@@ -910,11 +925,12 @@ class Trainer:
             # Calculate total epochs based on max_iters and dataset size
             current_epoch = math.floor(self.iter_num / len(self.train_loader))
 
-            while (local_iter_num < self.settings.training.max_iters_per_launch
-                   and self.iter_num < self.settings.training.max_iters
-                   and time.time() - tlaunch < self.settings.training.time_limit_seconds
-                   and not self.finished):
-
+            while (
+                local_iter_num < self.settings.training.max_iters_per_launch
+                and self.iter_num < self.settings.training.max_iters
+                and time.time() - tlaunch < self.settings.training.time_limit_seconds
+                and not self.finished
+            ):
                 # Set epoch for distributed sampler
                 if self.ddp:
                     self.train_loader.sampler.set_epoch(current_epoch)  # type: ignore[attr-defined]
@@ -1058,10 +1074,7 @@ class Trainer:
                     elif self.master_process and self.iter_num % self.settings.training.log_interval == 0:
                         # Log progress without tqdm
                         self.logger.info(
-                            f"Iter: {self.iter_num}/{self.settings.training.max_iters} "
-                            f"Loss: {total_loss.item():.4f} "
-                            f"LR: {lr:.4e} "
-                            f"Time: {dt*1000:.1f}ms",
+                            f"Iter: {self.iter_num}/{self.settings.training.max_iters} Loss: {total_loss.item():.4f} LR: {lr:.4e} Time: {dt*1000:.1f}ms",
                         )
 
                 current_epoch += 1
@@ -1087,14 +1100,10 @@ class Trainer:
         if iter_num > self.settings.optimizer.lr_decay_iters:
             return self.settings.optimizer.min_lr
 
-        decay_ratio = (iter_num - self.settings.optimizer.warmup_iters) / (
-            self.settings.optimizer.lr_decay_iters - self.settings.optimizer.warmup_iters
-        )
+        decay_ratio = (iter_num - self.settings.optimizer.warmup_iters) / (self.settings.optimizer.lr_decay_iters - self.settings.optimizer.warmup_iters)
         assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-        return self.settings.optimizer.min_lr + coeff * (
-            self.settings.optimizer.learning_rate - self.settings.optimizer.min_lr
-        )
+        return self.settings.optimizer.min_lr + coeff * (self.settings.optimizer.learning_rate - self.settings.optimizer.min_lr)
 
     def get_hparams_str(self) -> str:
         """Get hyperparameter string for logging"""
@@ -1103,13 +1112,17 @@ class Trainer:
 
         model_obj = self.get_module(cast(ViT, self.model))
 
-        resstr = f"{torch.mean(model_obj.module.sz * (self.settings.model.sz_init_value / self.settings.model.sz_init_scaling)):.5f} " if self.settings.model.use_nViT else "No sz, not using nViT"
+        resstr = (
+            f"{torch.mean(model_obj.module.sz * (self.settings.model.sz_init_value / self.settings.model.sz_init_scaling)):.5f} "
+            if self.settings.model.use_nViT
+            else "No sz, not using nViT"
+        )
 
         for block in model_obj.transformer.h:
-            sqk = block.sqk * (block.sqk_init_value/block.sqk_init_scaling)
+            sqk = block.sqk * (block.sqk_init_value / block.sqk_init_scaling)
             attn_alpha = block.attn_alpha * (block.attn_alpha_init_value / block.attn_alpha_init_scaling)
             mlp_alpha = block.mlp_alpha * (block.mlp_alpha_init_value / block.mlp_alpha_init_scaling)
-            suv = block.suv * (block.suv_init_value/block.suv_init_scaling)
+            suv = block.suv * (block.suv_init_value / block.suv_init_scaling)
 
             resstr += f"{torch.mean(sqk):.5f} "
             resstr += f"{torch.mean(attn_alpha):.5f} "
@@ -1139,35 +1152,41 @@ class Trainer:
     def get_transforms(self) -> Tuple[transforms.Compose, transforms.Compose]:
         """Get dataset-specific transforms"""
         if self.settings.data.dataset.lower() == "imagenet":
-            train_transform = transforms.Compose([
-                transforms.RandomResizedCrop(self.settings.model.image_size),
-                transforms.RandomHorizontalFlip(),
-                transforms.ColorJitter(0.4, 0.4, 0.4),
-                transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225]),
-            ])
-            val_transform = transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(self.settings.model.image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225]),
-            ])
+            train_transform = transforms.Compose(
+                [
+                    transforms.RandomResizedCrop(self.settings.model.image_size),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ColorJitter(0.4, 0.4, 0.4),
+                    transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ],
+            )
+            val_transform = transforms.Compose(
+                [
+                    transforms.Resize(256),
+                    transforms.CenterCrop(self.settings.model.image_size),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ],
+            )
         elif self.settings.data.dataset.lower() in ["cifar10", "cifar100"]:
-            train_transform = transforms.Compose([
-                transforms.RandomCrop(32, padding=4),
-                transforms.Resize(self.settings.model.image_size),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            ])
-            val_transform = transforms.Compose([
-                transforms.Resize(self.settings.model.image_size),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            ])
+            train_transform = transforms.Compose(
+                [
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.Resize(self.settings.model.image_size),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                ],
+            )
+            val_transform = transforms.Compose(
+                [
+                    transforms.Resize(self.settings.model.image_size),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                ],
+            )
         else:
             raise ValueError(f"Unsupported dataset: {self.settings.data.dataset}")
 
@@ -1247,11 +1266,7 @@ class Trainer:
                 )
             elif "CUDA error" in str(error):
                 self.logger.error(
-                    "CUDA ERROR!\n"
-                    "Try:\n"
-                    "\t1. Checking GPU availability\n"
-                    "\t2. Updating CUDA drivers\n"
-                    "\t3. Reducing model size",
+                    "CUDA ERROR!\nTry:\n\t1. Checking GPU availability\n\t2. Updating CUDA drivers\n\t3. Reducing model size",
                 )
         elif isinstance(error, ValueError):
             self.logger.error(f"Configuration error: {error}")
@@ -1285,12 +1300,14 @@ class Trainer:
             pin_memory=True if self.settings.system.device == "cuda" else False,
         )
 
+
 def main():
     trainer = Trainer()
     if trainer.settings.training.eval_only:
         trainer.validate_only()
     else:
         trainer.train()
+
 
 if __name__ == "__main__":
     main()

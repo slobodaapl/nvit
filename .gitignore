@@ -13,7 +13,14 @@ secrets.yaml
 *.egg-info
 *.egg-info
 **/__pycache__/**
-local_settings.yaml
-out/
+settings.local.yaml
+out/*
+!out/.gitkeep
+.cache
+.config
+.triton
 wandb/
 data/
+.env
+.local
+.netrc
