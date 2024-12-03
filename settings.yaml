@@ -12,6 +12,8 @@ training:
   max_iters_per_launch: 100000
   early_stopping_patience: 10
   save_numbered_checkpoints: false
+  consistency_weight: 0.1
+  smoothness_weight: 0.1
 
 optimizer:
   learning_rate: 0.0005
@@ -30,7 +32,6 @@ optimizer:
 
 model:
   image_size: 32
-  patch_size: 4
   n_layer: 3
   n_head: 4
   n_embd: 128
@@ -40,6 +41,20 @@ model:
   bias: true
   sz_init_value: 1.00
   sz_init_scaling: 1.0
+  local_patch_size: 8
+  global_patch_size: 16
+  kohonen_nodes: 512
+  kohonen_alpha: 0.01
+  use_kohonen: true
+  reconstruction_weight: 0.1
+  map_balance_weight: 0.5
+  local_quantization_weight: 0.1
+  global_quantization_weight: 0.1
+  kohonen_scheduler:
+    enabled: true
+    warmup_steps: 1000
+    decay_steps: 10000
+    min_lr: 0.001
 
 system:
   device: "cuda"
