@@ -313,6 +313,20 @@ testing = ["covdefaults (>=2.3)", "coverage (>=7.6.1)", "diff-cover (>=9.2)", "p
 typing = ["typing-extensions (>=4.12.2)"]
 
 [[package]]
+name = "flash-attn"
+version = "2.7.0.post2"
+description = "Flash Attention: Fast and Memory-Efficient Exact Attention"
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "flash_attn-2.7.0.post2.tar.gz", hash = "sha256:62244de20dabad9a42d0636f6b2ea4c051d33df179a0b3bea4352502ebca1466"},
+]
+
+[package.dependencies]
+einops = "*"
+torch = "*"
+
+[[package]]
 name = "fonttools"
 version = "4.55.0"
 description = "Tools to manipulate font files"
@@ -821,6 +835,35 @@ developer = ["mypy (>=1.1)", "pre-commit (>=3.2)"]
 doc = ["nb2plots (>=0.6)", "numpydoc (>=1.5)", "pillow (>=9.4)", "pydata-sphinx-theme (>=0.13)", "sphinx (>=6.1)", "sphinx-gallery (>=0.12)", "texext (>=0.6.7)"]
 extra = ["lxml (>=4.6)", "pydot (>=1.4.2)", "pygraphviz (>=1.10)", "sympy (>=1.10)"]
 test = ["codecov (>=2.1)", "pytest (>=7.2)", "pytest-cov (>=4.0)"]
+
+[[package]]
+name = "ninja"
+version = "1.11.1.2"
+description = "Ninja is a small build system with a focus on speed"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "ninja-1.11.1.2-py3-none-macosx_10_9_universal2.whl", hash = "sha256:1cfbb845095ea09da8c089375a8f999e75f4817d01506297c66181b533175647"},
+    {file = "ninja-1.11.1.2-py3-none-manylinux_2_12_i686.manylinux2010_i686.whl", hash = "sha256:ab4068ff7ff1f895485ad604116165b05d6810c802170a7f22c09dd678d5587d"},
+    {file = "ninja-1.11.1.2-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.whl", hash = "sha256:33d258809c8eda81f9d80e18a081a6eef3215e5fd1ba8902400d786641994e89"},
+    {file = "ninja-1.11.1.2-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ed25892c16e49e66383a8db6a67a9f33b41230fc485426094d7da51e2255ec2b"},
+    {file = "ninja-1.11.1.2-py3-none-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:232767144401847db62e8392047866698bb3678158a1ae4400a97111110e90f2"},
+    {file = "ninja-1.11.1.2-py3-none-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:9200247cf4c1643a67d079836b8dd31a362e34e618b50b5e3a5c0d0171efc442"},
+    {file = "ninja-1.11.1.2-py3-none-manylinux_2_28_armv7l.manylinux_2_31_armv7l.whl", hash = "sha256:0c9c36f6e6f8946c7271b0ed14d98fc3ea467a0c0954fb73f5f656c42667d943"},
+    {file = "ninja-1.11.1.2-py3-none-musllinux_1_1_aarch64.whl", hash = "sha256:3e815e4147832b17ec38417efcb31df51671ae273f083409304c7cc32a14dd1a"},
+    {file = "ninja-1.11.1.2-py3-none-musllinux_1_1_i686.whl", hash = "sha256:ecf3df324b56fdfb0872990a71e706efdae286e010310816c72b6bf24431711b"},
+    {file = "ninja-1.11.1.2-py3-none-musllinux_1_1_ppc64le.whl", hash = "sha256:cb6b476eb4e84c0efcfd3ab04f660dedce8adb854b56b043639312f3af176df6"},
+    {file = "ninja-1.11.1.2-py3-none-musllinux_1_1_s390x.whl", hash = "sha256:508fb93395a5c82a4d99d30fce0cbaf5cb2bd33e5c1dc9faaa080e199802dbc9"},
+    {file = "ninja-1.11.1.2-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:52af7f45750c5c288d566fd0c927ed9bb0d8f2e50803709f582a42bcc4ec167b"},
+    {file = "ninja-1.11.1.2-py3-none-musllinux_1_2_armv7l.whl", hash = "sha256:99fc4b87299242e10d7edd1c7737fdfb1269019e32f9f4267630887f6183a49e"},
+    {file = "ninja-1.11.1.2-py3-none-win32.whl", hash = "sha256:949e23cb2e79a33ea37d23a07d26846d2e75464e8e6940f8751fe964bc141dfa"},
+    {file = "ninja-1.11.1.2-py3-none-win_amd64.whl", hash = "sha256:0bca4179119426a3c3c9d5661c3b244d68781064e50907a1e066bc55edc18e06"},
+    {file = "ninja-1.11.1.2-py3-none-win_arm64.whl", hash = "sha256:ee7b1924c28e6cab5b866f7b229f07777d25d8cfccbbedf3da5ffb4f72f57877"},
+    {file = "ninja-1.11.1.2.tar.gz", hash = "sha256:4fbd07b2b4232543726abafdd350453a2fabef4527664ca0e491c578aee5f857"},
+]
+
+[package.extras]
+test = ["coverage (>=4.2)", "importlib_metadata (>=2.0)", "pytest (>=6.0)", "pytest-cov (>=3)"]
 
 [[package]]
 name = "numpy"
@@ -1894,4 +1937,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.8,<=3.11.9"
-content-hash = "b911809c804103a69bbb1ac1d77d1fcae5397760812445c486c62134d0c8b5ef"
+content-hash = "2d65351c48c558fae513dce6c67e82e69aa7d023dbaad548e21a83bd3491d1f0"

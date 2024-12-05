@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM nvcr.io/nvidia/pytorch:24.10-py3
 
 ENV DOCKER_BUILDKIT=1
@@ -28,7 +29,7 @@ RUN poetry export --without-hashes -f requirements.txt --output requirements.txt
     sed -i '/^torchvision/d' requirements.txt
 
 # Install Python dependencies
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt --no-cache-dir --no-build-isolation
 
 # Set working directory
 WORKDIR /app

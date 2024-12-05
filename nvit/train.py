@@ -472,6 +472,7 @@ class Trainer:
                 "n_layer": self.settings.model.n_layer,
                 "n_head": self.settings.model.n_head,
                 "n_embd": self.settings.model.n_embd,
+                "flash_attn": self.settings.model.flash_attn,
                 "use_nViT": self.settings.model.use_nViT,
                 "dropout": self.settings.model.dropout,
                 "bias": self.settings.model.bias,

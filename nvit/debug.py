@@ -3,12 +3,12 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torchvision
 from dynaconf import Dynaconf
 from loguru import logger
-from torch.nn import functional as F  # noqa: N812
-import torchvision
 from PIL import Image
-import torchvision.transforms as transforms
+from torch.nn import functional as F  # noqa: N812
+from torchvision import transforms
 
 from nvit.model import ViT, ViTConfig
 
@@ -17,7 +17,7 @@ LOGGER = logger.bind(name="nvit.debug")
 
 def extract_patches(img: torch.Tensor, patch_size: int, stride: int, padding: int = 0) -> torch.Tensor:
     """Extract raw patches from image before embedding.
-    
+
     :param img: Input image tensor [B, C, H, W]
     :param patch_size: Size of patches to extract
     :param stride: Stride between patches
@@ -25,25 +25,25 @@ def extract_patches(img: torch.Tensor, patch_size: int, stride: int, padding: in
     :return: Patches tensor of shape [N, C, patch_size, patch_size] where N is number of patches
     """
     LOGGER.debug(f"Input image shape: {img.shape}")
-    
+
     # Add padding if specified
     if padding > 0:
-        img = F.pad(img, (padding, padding, padding, padding), mode='reflect')
-        
+        img = F.pad(img, (padding, padding, padding, padding), mode="reflect")
+
     # Extract patches using unfold
     # First unfold height dimension
     patches = img.unfold(2, patch_size, stride)
     # Then unfold width dimension
     patches = patches.unfold(3, patch_size, stride)
-    
+
     # Reshape to [B, C, num_patches_h, num_patches_w, patch_size, patch_size]
     B, C, _, _, H, W = patches.shape
-    
+
     # Reshape to [N, C, patch_size, patch_size] where N = B * num_patches_h * num_patches_w
     patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(-1, C, patch_size, patch_size)
-    
+
     LOGGER.debug(f"Output patches shape: {patches.shape}")
-    
+
     return patches
 
 
@@ -68,7 +68,7 @@ def visualize_patches(img: torch.Tensor, local_patches: torch.Tensor, global_pat
     plt.subplot(1, 3, 1)
     img_show = img[0].permute(1, 2, 0).cpu()
     img_show = (img_show - img_show.min()) / (img_show.max() - img_show.min())
-    plt.imshow(img_show)
+    plt.imshow(img_show.to(dtype=torch.float32))
     plt.title(f"Original Image {tuple(img[0].shape)}")
 
     # Local patches - arrange in 4x4 grid
@@ -94,20 +94,20 @@ def make_patch_grid(patches: torch.Tensor, grid_size: int) -> torch.Tensor:
     :return: Grid tensor ready for visualization
     """
     LOGGER.debug(f"Input patches shape: {patches.shape}")
-    
+
     from torchvision.utils import make_grid
-    
+
     # Don't normalize individual patches
     grid = make_grid(
-        patches[:grid_size**2], 
+        patches[:grid_size**2],
         nrow=grid_size,
         padding=2,
         normalize=False,
     )
-    
+
     # Convert to [H, W, C] for matplotlib
     grid = grid.permute(1, 2, 0)
-    
+
     LOGGER.debug(f"Final grid shape: {grid.shape}")
     return grid.cpu()
 
@@ -178,7 +178,7 @@ def visualize_kohonen_maps(model: ViT, sample_input: torch.Tensor) -> None:
     # Normalize to [0, 1]
     similarity_matrix = (similarity_matrix - similarity_matrix.min()) / (similarity_matrix.max() - similarity_matrix.min() + 1e-8)
 
-    plt.imshow(similarity_matrix.cpu().numpy(), cmap="viridis")
+    plt.imshow(similarity_matrix.to(dtype=torch.float32).cpu().numpy(), cmap="viridis")
     plt.title(f"Combined Representation\nSimilarity Matrix ({similarity_matrix.shape[0]}x{similarity_matrix.shape[1]})")
     plt.colorbar()
 
@@ -191,7 +191,7 @@ def visualize_kohonen_maps(model: ViT, sample_input: torch.Tensor) -> None:
     )
 
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
 
 
 def make_grid(patches: torch.Tensor, *, normalize: bool = True) -> torch.Tensor:
@@ -247,6 +247,7 @@ def debug_model(settings_path: str = "settings.yaml", secrets_path: str = "secre
         n_head=settings.model.n_head,
         n_embd=settings.model.n_embd,
         use_nViT=settings.model.use_nViT,
+        flash_attn=settings.model.flash_attn,
         dropout=settings.model.dropout,
         bias=settings.model.bias,
         channels=3,
@@ -262,20 +263,17 @@ def debug_model(settings_path: str = "settings.yaml", secrets_path: str = "secre
 
     # Initialize model
     model = ViT(config)
-    LOGGER.info("Model configuration:")
-    LOGGER.info("Local patch size: {local_patch_size}", local_patch_size=config.local_patch_size)
-    LOGGER.info("Global patch size: {global_patch_size}", global_patch_size=config.global_patch_size)
-    LOGGER.info("Using Kohonen: {use_kohonen}", use_kohonen=config.use_kohonen)
-    LOGGER.info("Number of Kohonen nodes: {kohonen_nodes}", kohonen_nodes=config.kohonen_nodes)
 
-    # Move to CUDA if available
+    # Move to CUDA and convert to bfloat16
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    model = model.to(device).to(dtype)
+    LOGGER.info("Using device: {device} with dtype: {dtype}", device=device, dtype=dtype)
 
-    # Create sample input
-    sample_input = load_image('cat.png')
-    sample_input = sample_input.to(device)
-    batch_size = 2
+    # Create sample input and convert to bfloat16
+    sample_input = load_image("cat.png")
+    sample_input = sample_input.to(device).to(dtype)
+    batch_size = 2048
     sample_input = sample_input.repeat(batch_size, 1, 1, 1)
 
     # Full forward pass
@@ -301,7 +299,11 @@ def debug_model(settings_path: str = "settings.yaml", secrets_path: str = "secre
     LOGGER.info("Number of parameters: {num_params:,}", num_params=model.num_params)
 
     # Visualize patches and Kohonen maps
-    visualize_patches(sample_input[0], local_patches[0], global_patches[0])
+    visualize_patches(
+        sample_input[0].to(dtype=torch.float32),
+        local_patches[0].to(dtype=torch.float32),
+        global_patches[0].to(dtype=torch.float32),
+    )
     if config.use_kohonen:
         visualize_kohonen_maps(model, sample_input)
 
@@ -314,12 +316,13 @@ def load_image(image_path: str) -> torch.Tensor:
     :param image_path: Path to the image file
     :return: Image tensor [1, C, H, W]
     """
-    image = Image.open(image_path).convert('RGB')
+    image = Image.open(image_path).convert("RGB")
     transform = transforms.Compose([
-        transforms.ToTensor(),  # Convert to tensor
-        transforms.Resize((32, 32)),  # Resize to match the expected input size
+        transforms.ToTensor(),
+        transforms.Resize((32, 32)),
     ])
-    img_tensor = transform(image).unsqueeze(0)  # Add batch dimension
+    # Keep as float32 initially - will be converted to bfloat16 later if needed
+    img_tensor = transform(image).unsqueeze(0)
     return img_tensor
 
 
@@ -355,8 +358,12 @@ def visualize_patches_with_image(image_path: str) -> None:
     plt.title(f"Global Patches (16x16) - {global_raw.shape[0]} patches")
 
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
 
 
 if __name__ == "__main__":
+    import time
+    start_time = time.time()
     debug_model()
+    end_time = time.time()
+    print(f"Execution time: {end_time - start_time:.2f} seconds")

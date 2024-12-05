@@ -39,6 +39,7 @@ model:
   num_classes: 10
   dropout: 0.05
   bias: true
+  flash_attn: true
   sz_init_value: 1.00
   sz_init_scaling: 1.0
   local_patch_size: 8

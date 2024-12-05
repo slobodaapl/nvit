@@ -42,10 +42,12 @@ The main components are:
 
 ### **Running the Code**
 
+Install dependencies with `poetry install`
+
 To start the training process with defined hyperparameters, execute `launcher.sh`.
 You can specify the number of GPUs to use as an argument: `./launcher.sh 8`
 
-If you are using Windows, you can use `docker_launcher.ps1` instead, in which case Dockerfile
+If you are using Windows, you can use `docker_launcher.ps1` instead, in which case you need to build the Docker image first with `build.sh` or `build.ps1` in the `docker` directory. The docker launcher has both Linux (bash) and Windows (PowerShell) variants.
 
 ### **Implementation Details**
 
@@ -91,7 +93,7 @@ The training objective combines several losses with adjustable weights:
 
 2. **Quantization Loss**
    - Ensures mapped representations stay close to original patches
-   
+
    $\mathcal{L}_{quant} = \lambda_{lq} \|K_l(P_l) - P_l\|_2^2 + \lambda_{gq} \|K_g(P_g) - P_g\|_2^2$
    
    where $K_l$ and $K_g$ are local and global Kohonen maps

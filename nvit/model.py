@@ -1,12 +1,11 @@
 import math
-from dataclasses import dataclass, field
-from typing import cast
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+from flash_attn import flash_attn_func
 from torch import nn
-from torch.nn.attention.flex_attention import flex_attention
 
 from nvit.kohonen import KohonenMap
 
@@ -19,6 +18,7 @@ class ViTConfig:
     n_embd: int = 1024
     base_scale: float = 1.0 / (1024.0 ** 0.5)    # 1 / sqrt(n_embd)
     use_nViT: int = 0
+    flash_attn: bool = False
     sz_init_value: float = 1.00
     sz_init_scaling: float = 1.0
     dropout: float = 0.0
@@ -111,8 +111,10 @@ class Block(nn.Module):
         q = q.to(v.dtype)
         k = k.to(v.dtype)
 
-        # Get attention output [B, H, T, D]
-        attn_output = cast(torch.Tensor,flex_attention(q, k, v, scale=softmax_scale))
+        if self.config.flash_attn:
+            attn_output = flash_attn_func(q, k, v, softmax_scale=softmax_scale, causal=False)
+        else:
+            attn_output = F.scaled_dot_product_attention(q, k, v, attn_mask=None, scale=softmax_scale, dropout_p=0.0, is_causal=False)
 
         # Merge heads back: [B, H, T, D] -> [B, T, C]
         h_att = rearrange(attn_output, "b h t d -> b t (h d)")
@@ -237,7 +239,7 @@ class ViT(nn.Module):
                 config.n_embd,
                 kernel_size=config.global_patch_size,
                 stride=config.local_patch_size,  # Match local patch stride for alignment
-            )
+            ),
         )
 
         # Calculate number of patches for position embeddings
@@ -368,11 +370,11 @@ class ViT(nn.Module):
 
             # Use the Kohonen representations instead of original patches
             patches = self.cross_attention(local_repr, global_repr)
-            
+
             # Compute additional losses
             aux_losses["kohonen_consistency"] = self.compute_consistency_loss(local_repr, global_repr)
             aux_losses["kohonen_smoothness"] = self.compute_smoothness_loss(local_indices, global_indices)
-            
+
             # Add quantization losses to ensure representations stay close to original patches
             aux_losses["local_quantization"] = F.mse_loss(local_repr, local_patches)
             aux_losses["global_quantization"] = F.mse_loss(global_repr, global_patches)
@@ -418,7 +420,7 @@ class ViT(nn.Module):
         # Normalize both representations
         local_norm = local_repr / local_repr.norm(p=2, dim=-1, keepdim=True)
         global_norm = global_repr / global_repr.norm(p=2, dim=-1, keepdim=True)
-        
+
         # Compute cosine similarity
         consistency = (local_norm * global_norm).sum(dim=-1)
         return 1.0 - consistency.mean()
@@ -428,46 +430,46 @@ class ViT(nn.Module):
         # Get neighboring indices
         local_neighbors = self.get_neighbor_indices(local_indices)
         global_neighbors = self.get_neighbor_indices(global_indices)
-        
+
         # Compute smoothness for both maps
         local_smoothness = self.compute_map_smoothness(local_indices, local_neighbors, is_local=True)
         global_smoothness = self.compute_map_smoothness(global_indices, global_neighbors, is_local=False)
-        
+
         return local_smoothness + global_smoothness
 
     def get_neighbor_indices(self, indices: torch.Tensor) -> torch.Tensor:
         """Get neighboring indices for each index in the Kohonen map"""
         nodes_per_map = self.config.kohonen_nodes // 2
         map_size = int(math.sqrt(nodes_per_map))
-        
+
         if map_size * map_size != nodes_per_map:
             raise ValueError(
                 f"Number of nodes per map ({nodes_per_map}) must be a perfect square. "
-                f"Got {self.config.kohonen_nodes} total nodes."
+                f"Got {self.config.kohonen_nodes} total nodes.",
             )
-        
+
         # Convert linear indices to 2D coordinates
         row = (indices // map_size).unsqueeze(-1)  # Shape: (batch_size, num_indices, 1)
         col = (indices % map_size).unsqueeze(-1)   # Shape: (batch_size, num_indices, 1)
-        
+
         # Get neighbor coordinates (8-neighborhood)
         neighbor_offsets = torch.tensor([
             [-1, -1], [-1, 0], [-1, 1],
             [0, -1],           [0, 1],
-            [1, -1],  [1, 0],  [1, 1]
+            [1, -1],  [1, 0],  [1, 1],
         ], device=indices.device)  # Shape: (8, 2)
-        
+
         # Expand coordinates to match neighbor dimensions
         row = row.expand(-1, -1, 8)  # Shape: (batch_size, num_indices, 8)
         col = col.expand(-1, -1, 8)  # Shape: (batch_size, num_indices, 8)
-        
+
         # Add offsets to current coordinates
         neighbor_rows = (row + neighbor_offsets[:, 0].view(1, 1, -1)) % map_size  # Shape: (batch_size, num_indices, 8)
         neighbor_cols = (col + neighbor_offsets[:, 1].view(1, 1, -1)) % map_size  # Shape: (batch_size, num_indices, 8)
-        
+
         # Convert back to linear indices
         neighbor_indices = neighbor_rows * map_size + neighbor_cols
-        
+
         return neighbor_indices
 
     def compute_map_smoothness(self, indices: torch.Tensor, neighbor_indices: torch.Tensor, is_local: bool = True) -> torch.Tensor:
@@ -481,17 +483,17 @@ class ViT(nn.Module):
         """
         # Use correct map
         kohonen_map = self.local_kohonen if is_local else self.global_kohonen
-        
+
         # Get embeddings for current indices and their neighbors
         current_embeddings = kohonen_map.nodes[indices]  # Shape: (batch_size, num_indices, embd_dim)
         neighbor_embeddings = kohonen_map.nodes[neighbor_indices]  # Shape: (batch_size, num_indices, num_neighbors, embd_dim)
-        
+
         # Compute average distance to neighbors
         distances = torch.norm(
             current_embeddings.unsqueeze(2) - neighbor_embeddings,
-            p=2, dim=-1
+            p=2, dim=-1,
         )
-        
+
         return distances.mean()
 
     def get_kohonen_lr(self, step: int) -> float:
@@ -507,10 +509,9 @@ class ViT(nn.Module):
         if step < warmup_steps:
             # Linear warmup
             return min_lr + (max_lr - min_lr) * (step / warmup_steps)
-        elif step > decay_steps:
+        if step > decay_steps:
             return min_lr
-        else:
-            # Cosine decay
-            decay_ratio = (step - warmup_steps) / (decay_steps - warmup_steps)
-            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-            return min_lr + coeff * (max_lr - min_lr)
+        # Cosine decay
+        decay_ratio = (step - warmup_steps) / (decay_steps - warmup_steps)
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (max_lr - min_lr)
