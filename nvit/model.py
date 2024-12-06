@@ -76,6 +76,10 @@ class Block(nn.Module):
             self.suv_init_scaling = torch.scalar_tensor(1.0, dtype=torch.float32)
             self.suv = torch.nn.Parameter(self.suv_init_scaling*torch.ones(2 * 4 * config.n_embd, dtype=torch.float32))
 
+    def norm_skip(self, source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        res = source + target
+        res = res / res.norm(p=2, dim=-1, keepdim=True)
+        return res
 
     def justnorm(self, x: torch.Tensor) -> torch.Tensor:
         #return F.normalize(x, p=2, dim=-1)
@@ -368,8 +372,9 @@ class ViT(nn.Module):
                 self.local_kohonen.update_nodes(local_patches, local_indices, lr)
                 self.global_kohonen.update_nodes(global_patches, global_indices, lr)
 
-            # Use the Kohonen representations instead of original patches
-            patches = self.cross_attention(local_repr, global_repr)
+            # Combine local and global representations
+            local_patches_new = self.cross_attention(local_repr, local_patches)
+            global_patches_new = self.cross_attention(global_repr, global_patches)
 
             # Compute additional losses
             aux_losses["kohonen_consistency"] = self.compute_consistency_loss(local_repr, global_repr)
@@ -379,13 +384,15 @@ class ViT(nn.Module):
             aux_losses["local_quantization"] = F.mse_loss(local_repr, local_patches)
             aux_losses["global_quantization"] = F.mse_loss(global_repr, global_patches)
 
+            patches = self.cross_attention(local_patches_new, global_patches_new)
         else:
             # Without Kohonen maps, use cross attention directly
             patches = self.cross_attention(local_patches, global_patches)
 
         # Apply transformer blocks
         for block in self.transformer.h:
-            patches = block(patches)
+            patches_new = block(patches)
+            patches = self.norm_skip(patches_new, patches)
 
         # Classification head
         x = patches.mean(dim=1)
