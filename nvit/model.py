@@ -51,6 +51,7 @@ class Block(nn.Module):
         self.value = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.att_c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
+        self.skip_param = nn.Parameter(torch.ones(1))
         self.c_fc = nn.Linear(config.n_embd, 2 * 4 * config.n_embd, bias=config.bias)
         self.silu = nn.SiLU()
         self.mlp_c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
@@ -77,7 +78,7 @@ class Block(nn.Module):
             self.suv = torch.nn.Parameter(self.suv_init_scaling*torch.ones(2 * 4 * config.n_embd, dtype=torch.float32))
 
     def norm_skip(self, source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        res = source + target
+        res = source * self.skip_param + target
         res = res / res.norm(p=2, dim=-1, keepdim=True)
         return res
 
@@ -392,7 +393,7 @@ class ViT(nn.Module):
         # Apply transformer blocks
         for block in self.transformer.h:
             patches_new = block(patches)
-            patches = self.norm_skip(patches_new, patches)
+            patches = block.norm_skip(patches_new, patches)
 
         # Classification head
         x = patches.mean(dim=1)
