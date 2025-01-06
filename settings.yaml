@@ -47,10 +47,10 @@ model:
   kohonen_nodes: 512
   kohonen_alpha: 0.01
   use_kohonen: true
-  reconstruction_weight: 0.1
-  map_balance_weight: 0.5
-  local_quantization_weight: 0.1
-  global_quantization_weight: 0.1
+  reconstruction_weight: 0.5
+  map_balance_weight: 0.25
+  local_quantization_weight: 0.125
+  global_quantization_weight: 0.125
   kohonen_scheduler:
     enabled: true
     warmup_steps: 1000

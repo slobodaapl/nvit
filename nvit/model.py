@@ -40,6 +40,10 @@ class ViTConfig:
     global_quantization_weight: float = 0.1
 
 
+def justnorm(x: torch.Tensor) -> torch.Tensor:
+        return x / x.norm(p=2, dim=-1, keepdim=True)
+
+
 class Block(nn.Module):
 
     def __init__(self, config: ViTConfig) -> None:
@@ -83,12 +87,10 @@ class Block(nn.Module):
         return res
 
     def justnorm(self, x: torch.Tensor) -> torch.Tensor:
-        #return F.normalize(x, p=2, dim=-1)
-        res = x / x.norm(p=2, dim=-1, keepdim=True)
-        return res
+        return justnorm(x)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        B, T, C = h.size()  # batch, sequence_length, embedding_dim
+        _, _, C = h.size()  # batch, sequence_length, embedding_dim
 
         if (self.config.use_nViT == 0):
             h = self.rmsnorm_att(h)
@@ -183,23 +185,44 @@ class RMSNorm(torch.nn.Module):
 
 
 class CrossAttentionBlock(nn.Module):
+    """Cross attention block that can operate in both standard and nViT modes."""
+
     def __init__(self, config: ViTConfig) -> None:
         super().__init__()
         self.config = config
 
-        self.local_norm = RMSNorm(config.n_embd)
-        self.global_norm = RMSNorm(config.n_embd)
+        # Normalization layers
+        if config.use_nViT == 0:
+            self.local_norm = RMSNorm(config.n_embd)
+            self.global_norm = RMSNorm(config.n_embd)
 
+        # Attention layers
         self.q_local = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.k_global = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.v_global = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.proj = nn.Linear(config.n_embd, 2 * config.n_embd, bias=config.bias)
+        self.silu = nn.SiLU()
+        self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
-        self.proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        # nViT specific parameters
+        if config.use_nViT == 1:
+            # Attention parameters
+            self.attn_alpha_init_value = torch.scalar_tensor(0.05, dtype=torch.float32)
+            self.attn_alpha_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
+            self.attn_alpha = nn.Parameter(self.attn_alpha_init_scaling * torch.ones(config.n_embd, dtype=torch.float32))
+
+            # Scale parameters for Q, K
+            self.sqk_init_value = torch.scalar_tensor(1.0, dtype=torch.float32)
+            self.sqk_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
+            self.sqk = nn.Parameter(self.sqk_init_scaling * torch.ones(config.n_embd, dtype=torch.float32))
 
     def forward(self, local: torch.Tensor, global_: torch.Tensor) -> torch.Tensor:
-        local = self.local_norm(local)
-        global_ = self.global_norm(global_)
+        # Apply normalization based on mode
+        if self.config.use_nViT == 0:
+            local = self.local_norm(local)
+            global_ = self.global_norm(global_)
 
+        # Project to q, k, v
         q = self.q_local(local)
         k = self.k_global(global_)
         v = self.v_global(global_)
@@ -209,15 +232,48 @@ class CrossAttentionBlock(nn.Module):
         k = rearrange(k, "b t (h d) -> b h t d", h=self.config.n_head)
         v = rearrange(v, "b t (h d) -> b h t d", h=self.config.n_head)
 
-        # Cross attention
-        scale = (self.config.n_embd // self.config.n_head) ** -0.5
-        attn = (q @ k.transpose(-2, -1)) * scale
-        attn = F.softmax(attn, dim=-1)
+        # Apply nViT normalization and scaling
+        if self.config.use_nViT == 1:
+            sqk = (self.sqk * (self.sqk_init_value / self.sqk_init_scaling))
+            sqk = rearrange(sqk, "(h d) -> 1 h 1 d", h=self.config.n_head)
+            q = sqk * justnorm(q)
+            k = sqk * justnorm(k)
 
-        out = attn @ v
+        # Cross attention with appropriate scaling
+        head_size = self.config.n_embd // self.config.n_head
+        sqrt_head_dim = head_size ** 0.5
+        softmax_scale = 1.0 / sqrt_head_dim if self.config.use_nViT == 0 else sqrt_head_dim
+
+        # Ensure same dtype
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
+
+        # Compute attention
+        if self.config.flash_attn:
+            out = flash_attn_func(q, k, v, softmax_scale=softmax_scale, causal=False)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, scale=softmax_scale, dropout_p=0.0, is_causal=False)
+
+        # Merge heads and project with SiLU gating
         out = rearrange(out, "b h t d -> b t (h d)")
+        out = self.proj(out)
+        u, v = torch.chunk(out, 2, dim=-1)
+        out = u * self.silu(v)
+        out = self.out_proj(out)
 
-        return self.proj(out)
+        # Apply nViT learning rate and normalization
+        if self.config.use_nViT == 1:
+            lr = self.attn_alpha * (self.attn_alpha_init_value / self.attn_alpha_init_scaling)
+            lr = torch.abs(lr)
+
+            local_norm = justnorm(local)
+            out_norm = justnorm(out)
+
+            res = local_norm + lr * (out_norm - local_norm)
+            out = justnorm(res)
+
+        return out
+
 
 class ViT(nn.Module):
     def __init__(self, config: ViTConfig):
@@ -276,10 +332,10 @@ class ViT(nn.Module):
         )
 
         # Transformer blocks
-        self.transformer = nn.ModuleDict(dict(
-            drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-        ))
+        self.transformer = nn.ModuleDict({
+            "drop": nn.Dropout(config.dropout),
+            "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+        })
 
         # Output head
         self.mlp_head = nn.Sequential(
@@ -329,7 +385,7 @@ class ViT(nn.Module):
         return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> tuple[float, float]:
-        """Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
+        """Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS."""
         # First estimate the number of flops we do per iteration.
         # See: https://github.com/pytorch/pytorch/issues/110656
         N = sum(p.numel() for p in self.parameters())
@@ -382,8 +438,8 @@ class ViT(nn.Module):
             aux_losses["kohonen_smoothness"] = self.compute_smoothness_loss(local_indices, global_indices)
 
             # Add quantization losses to ensure representations stay close to original patches
-            aux_losses["local_quantization"] = F.mse_loss(local_repr, local_patches)
-            aux_losses["global_quantization"] = F.mse_loss(global_repr, global_patches)
+            aux_losses["local_quantization"] = F.huber_loss(local_repr, local_patches)
+            aux_losses["global_quantization"] = F.huber_loss(global_repr, global_patches)
 
             patches = self.cross_attention(local_patches_new, global_patches_new)
         else:
