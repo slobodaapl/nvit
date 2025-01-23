@@ -171,7 +171,7 @@ The training objective combines several losses with adjustable weights:
 2. **Quantization Loss**
    - Ensures mapped representations stay close to original patches
 
-   $\mathcal{L}_{quant} = \lambda_{lq} \|K_l(P_l) - P_l\|_2^2 + \lambda_{gq} \|K_g(P_g) - P_g\|_2^2$
+   $\mathcal{L}_{quant} = \lambda _{lq} \|K_l(P_l) - P_l\|_2^2 + \lambda _{gq} \|K_g(P_g) - P_g\|_2^2$
    
    where $K_l$ and $K_g$ are local and global Kohonen maps
    $\lambda_{lq} = \lambda_{gq} = 0.1$ (default weights)
@@ -203,7 +203,7 @@ The training objective combines several losses with adjustable weights:
 
 The final loss combines all components:
 
-$\mathcal{L}_{total} = \mathcal{L}_{cls} + \mathcal{L}_{quant} + \mathcal{L}_{cons} + \mathcal{L}_{smooth} + \mathcal{L}_{rec}$
+$\mathcal{L}_{total} = \mathcal{L} _{cls} + \mathcal{L} _{quant} + \mathcal{L} _{cons} + \mathcal{L} _{smooth} + \mathcal{L} _{rec}$
 
 #### **Training Dynamics**
 
