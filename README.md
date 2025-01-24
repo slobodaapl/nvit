@@ -225,10 +225,8 @@ $\mathcal{L}_{total} = \mathcal{L} _{cls} + \mathcal{L} _{quant} + \mathcal{L} _
    - Output preserves unit norm through final normalization
 
 3. **Representation Flow**
-   ```
-   Input Image → Local/Global Patches → Kohonen Mapping →
-   Cross-Attention → Transformer Blocks → Classification
-   ```
+ 
+   $\text{Input Image} \rightarrow \text{Local/Global Patches} \rightarrow \text{Kohonen Mapping} \rightarrow \text{Cross-Attention} \rightarrow \text{Transformer Blocks} \rightarrow \text{Classification}$
 
 This framework effectively combines the benefits of:
 - Normalized representations (from nGPT)
