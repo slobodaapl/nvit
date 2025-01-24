@@ -19,7 +19,7 @@ while [[ $# -gt 0 ]]; do
             profiles_dir="$2"
             shift 2
             ;;
-        --no-rm-container)
+        --no-rm)
             unset remove_container
             shift
             ;;

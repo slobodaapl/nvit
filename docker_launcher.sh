@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
             detached=true
             shift
             ;;
-        --no-rm-container)
+        --no-rm)
             unset remove_container
             shift
             ;;
