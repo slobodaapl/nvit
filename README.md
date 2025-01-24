@@ -21,7 +21,8 @@
 # **nViT: Normalized Vision Transformer**
 Highly based on [original nGPT implementation](https://github.com/NVIDIA/ngpt)
 
-**Author**: Tibor Sloboda
+**Authors**: Tibor Sloboda (slobodaapl), 0x484558
+**Affiliation**: STU Faculty of Informatics and Information Technology, NetFire
 
 ## **Project Overview**
 
