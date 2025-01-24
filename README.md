@@ -72,17 +72,17 @@ You can use `just docker-build` to build the Docker image (or `build.ps1` in the
 just train [FLAGS]
 
 # Supported flags:
+-d, --detach            Run in background (tmux)
 --num-gpus N            Number of GPUs to use
 --visible-gpus LIST     Specific GPUs to use (e.g., "0,1")
 --session NAME          tmux session name
--d, --detach            Run in background (tmux)
+--no-rm-container       Do not remove container after exit
+--env-file FILE         Path to .env file with training parameters
 
 # Examples:
-just train                        # Use defaults, run in foreground
-just train --num-gpus 4           # Use 4 GPUs
-just train --visible-gpus "0,1"   # Specific GPUs
-just train -d                     # Run in background
-just train --num-gpus 2 -d        # Combined usage
+just train                       # Use defaults, run in foreground
+just train -d --num-gpus 2       # Run in background, use 2 GPUs
+just train --visible-gpus "0,1"  # Specific GPUs
 ```
 
 #### **Profile-based Training:**
@@ -106,12 +106,12 @@ just run-profiles [FLAGS]
 --visible-gpus LIST    Specific GPUs to use
 --profiles-dir DIR     Directory containing .env files
 --session NAME         tmux session name
+--no-rm-container      Do not remove container after exit
 
 # Examples:
-just run-profiles                          # Use defaults
-just run-profiles --num-gpus 4             # Use 4 GPUs
-just run-profiles --visible-gpus "0,1"     # Specific GPUs
-just run-profiles --profiles-dir "./exp"   # Custom directory
+just run-profiles                        # Use defaults
+just run-profiles --num-gpus 4           # Use 4 GPUs
+just run-profiles --visible-gpus "0,1"   # Specific GPUs
 ```
 
 If you need to specify common environment variables for all profiles, you can do by creating a `.env` file (without anything before the dot) in the root of this repository.

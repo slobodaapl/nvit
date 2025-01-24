@@ -4,7 +4,7 @@
 num_gpus=1
 visible_gpus="all"
 env_file=".env"
-remove_container=true  # Default to removing container after exit
+remove_container=1
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -25,8 +25,8 @@ while [[ $# -gt 0 ]]; do
             detached=true
             shift
             ;;
-        --no-rm)
-            remove_container=false
+        --no-rm-container)
+            unset remove_container
             shift
             ;;
         *)
