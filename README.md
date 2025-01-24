@@ -1,4 +1,6 @@
-> ## [MIT License](https://opensource.org/license/mit)
+> **[MIT License](https://opensource.org/license/mit)**
+>
+> Copyright(c) 2024 Tibor Sloboda. All rights reserved.
 >
 > Permission is hereby granted, free of charge, to any person obtaining a
 > copy of this software and associated documentation files (the "Software"),
@@ -17,11 +19,13 @@
 > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 > FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 > DEALINGS IN THE SOFTWARE.
+>
+> Third-party licenses are listed in [THIRD_PARTY.txt](THIRD_PARTY.txt)
 
 # **nViT: Normalized Vision Transformer**
 Highly based on [original nGPT implementation](https://github.com/NVIDIA/ngpt)
 
-**Authors**: Tibor Sloboda (slobodaapl), 0x484558
+**Authors**: Tibor Sloboda ([slobodaapl](https://github.com/slobodaapl)), [0x484558](https://github.com/0x484558)
 
 **Affiliation**: STU Faculty of Informatics and Information Technology, NetFire
 
@@ -72,17 +76,16 @@ You can use `just docker-build` to build the Docker image (or `build.ps1` in the
 just train [FLAGS]
 
 # Supported flags:
---num-gpus N            Number of GPUs to use
---visible-gpus LIST     Specific GPUs to use (e.g., "0,1")
---session NAME          tmux session name
--d, --detach            Run in background (tmux)
+-d, --detach          Run in background (tmux)
+--num-gpus N          Number of GPUs to use
+--visible-gpus LIST   Specific GPUs to use (e.g., "0,1")
+--no-rm               Do not remove container after exit
+--env-file FILE       Path to .env file with training parameters
 
 # Examples:
-just train                        # Use defaults, run in foreground
-just train --num-gpus 4           # Use 4 GPUs
-just train --visible-gpus "0,1"   # Specific GPUs
-just train -d                     # Run in background
-just train --num-gpus 2 -d        # Combined usage
+just train                      # Use defaults, run in foreground
+just train -d --num-gpus 2      # Run in background, use 2 GPUs
+just train --visible-gpus "0,1" # Specific GPUs
 ```
 
 #### **Profile-based Training:**
@@ -102,16 +105,15 @@ Use `just run-profiles` to run training for all profiles. The training script wi
 just run-profiles [FLAGS]
 
 # Supported flags:
---num-gpus N           Number of GPUs to use
---visible-gpus LIST    Specific GPUs to use
---profiles-dir DIR     Directory containing .env files
---session NAME         tmux session name
+--num-gpus N          Number of GPUs to use
+--visible-gpus LIST   Specific GPUs to use
+--profiles-dir DIR    Directory containing .env files
+--no-rm               Do not remove containers after exit
 
 # Examples:
-just run-profiles                          # Use defaults
-just run-profiles --num-gpus 4             # Use 4 GPUs
-just run-profiles --visible-gpus "0,1"     # Specific GPUs
-just run-profiles --profiles-dir "./exp"   # Custom directory
+just run-profiles                      # Use defaults
+just run-profiles --num-gpus 4         # Use 4 GPUs
+just run-profiles --visible-gpus "0,1" # Specific GPUs
 ```
 
 If you need to specify common environment variables for all profiles, you can do by creating a `.env` file (without anything before the dot) in the root of this repository.
@@ -120,7 +122,7 @@ If you need to specify common environment variables for all profiles, you can do
 
 ```bash
 # View running session
-tmux attach -t nvit
+just attach # alternative: tmux attach -t nvit
 
 # Inside tmux:
 Ctrl+B, D # Detach from session
@@ -236,5 +238,3 @@ This framework effectively combines the benefits of:
 - Self-supervised learning (via reconstruction)
 
 The result is a vision transformer that maintains interpretable, normalized representations throughout its processing pipeline while capturing both local and global visual patterns.
-
----

@@ -3,6 +3,7 @@
 num_gpus=1
 visible_gpus="all"
 profiles_dir="profiles"
+remove_container=1
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -17,6 +18,10 @@ while [[ $# -gt 0 ]]; do
         --profiles-dir)
             profiles_dir="$2"
             shift 2
+            ;;
+        --no-rm)
+            unset remove_container
+            shift
             ;;
         *)
             echo "Unknown argument: $1"
@@ -44,5 +49,6 @@ for env_file in "${env_files[@]}"; do
     ./docker_launcher.sh \
         --num-gpus "$num_gpus" \
         --visible-gpus "$visible_gpus" \
-        --env-file <(echo -e "${local_env}\n${profile_env}")
+        --env-file <(echo -e "${local_env}\n${profile_env}") \
+        ${remove_container:+--no-rm-container}
 done
