@@ -336,7 +336,7 @@ class Trainer:
                 if self.settings.data.augmentation.auto_augment:
                     if self.settings.data.dataset.lower() == "imagenet":
                         train_transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET))
-                    else:
+                    elif self.settings.data.dataset.lower() in ["cifar10", "cifar100"]:
                         train_transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10))
 
             # Add final transforms
@@ -344,8 +344,11 @@ class Trainer:
             val_transform_list.extend([transforms.ToTensor(), normalize])
 
             # Create transform compositions
-            train_transform = transforms.Compose(train_transform_list)
-            val_transform = transforms.Compose(val_transform_list)
+            train_transform = torch.nn.Sequential(*train_transform_list)
+            val_transform = torch.nn.Sequential(*val_transform_list)
+
+            train_transform.to(self.device)
+            val_transform.to(self.device)
 
             # Create datasets
             if self.settings.data.dataset.lower() == "imagenet":
