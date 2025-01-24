@@ -29,7 +29,7 @@ RUN poetry export --without-hashes -f requirements.txt --output requirements.txt
     sed -i '/^torchvision/d' requirements.txt
 
 # Install Python dependencies
-RUN pip install -r requirements.txt --no-cache-dir --no-build-isolation
+RUN pip install -r requirements.txt --no-cache-dir --no-build-isolation --upgrade
 
 # Set working directory
 WORKDIR /app
