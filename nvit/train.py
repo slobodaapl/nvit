@@ -260,11 +260,20 @@ class Trainer:
             valset = None
 
             train_transform_diff, val_transform_diff = self.get_transforms()
-            train_transform_diff.to(self.device)
-            val_transform_diff.to(self.device)
-            to_tensor = torchvision.transforms.ToTensor()
-            train_transform = lambda x: train_transform_diff(to_tensor(x).to(self.device))
-            val_transform = lambda x: val_transform_diff(to_tensor(x).to(self.device))
+            train_transform_diff = train_transform_diff.to(self.device)
+            val_transform_diff = val_transform_diff.to(self.device)
+
+            # Create a composed transform that handles both conversion and device movement
+            train_transform = torchvision.transforms.Compose([
+                torchvision.transforms.ToTensor(),
+                lambda x: x.to(self.device),
+                train_transform_diff,
+            ])
+            val_transform = torchvision.transforms.Compose([
+                torchvision.transforms.ToTensor(),
+                lambda x: x.to(self.device),
+                val_transform_diff,
+            ])
 
             # Create datasets
             if self.settings.data.dataset.lower() == "imagenet":
