@@ -59,4 +59,4 @@ docker run \
     --user ${USER_ID}:${GROUP_ID} \
     ${detached:+-d} \
     nvit:latest \
-    torchrun --nnodes 1 --nproc_per_node $num-gpus --rdzv_endpoint=localhost:29501 nvit/train.py
+    torchrun --nnodes 1 --nproc_per_node $num_gpus --rdzv_endpoint=localhost:29501 nvit/train.py
