@@ -43,6 +43,7 @@ fi
 # Run docker container with local directory mounted and execute training command
 docker run --rm \
     --gpus "\"device=$visible_gpus\"" \
+    --shm-size=16gb \
     -v $(pwd):/app \
     -w /app \
     -e HOME=/app \

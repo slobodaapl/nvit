@@ -26,6 +26,7 @@ if ($detached) {
 # Run docker container with local directory mounted and execute training command
 Invoke-Expression "$docker_cmd ``
     --gpus `"device=$visible_gpus`" ``
+    --shm-size=16gb ``
     -v ${PWD}:/app ``
     -w /app ``
     -e HOME=/app ``
