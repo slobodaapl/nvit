@@ -9,6 +9,7 @@ readme = "README.md"
 python = ">=3.8,<=3.11.9"
 ninja = "1.*"
 packaging = "24.*"
+kornia = "0.*"
 flash-attn = { version = "2.*", source = "pypi", allow-prereleases = true }
 torch = { version = "2.*", source = "pytorch-gpu" }
 torchvision = { version = "0.*", source = "pytorch-gpu" }

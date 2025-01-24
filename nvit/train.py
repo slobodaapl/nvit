@@ -15,6 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
+import kornia
 import numpy as np
 import psutil
 import torch
@@ -219,6 +220,7 @@ class Trainer:
             dist.init_process_group(
                 backend=self.settings.system.backend,
                 init_method="env://",
+                device_id=torch.device("cuda",self.ddp_local_rank),
                 timeout=timedelta(minutes=30),
             )
 
@@ -226,7 +228,7 @@ class Trainer:
             self.seed_offset = self.ddp_rank
 
             # Wait for all processes to reach this point
-            dist.barrier()
+            dist.barrier(device_ids=list(range(self.ddp_world_size)))
 
             if self.master_process:
                 self.logger.info(f"Distributed training initialized with {self.ddp_world_size} GPUs")
@@ -257,96 +259,7 @@ class Trainer:
             trainset = None
             valset = None
 
-            # Get base transforms
-            train_transform_list = []
-            val_transform_list = []
-
-            if self.settings.data.dataset.lower() == "imagenet":
-                # Base transforms for ImageNet
-                train_transform_list.extend(
-                    [
-                        transforms.RandomResizedCrop(self.settings.model.image_size),
-                        transforms.RandomHorizontalFlip(),
-                    ],
-                )
-                val_transform_list.extend(
-                    [
-                        transforms.Resize(256),
-                        transforms.CenterCrop(self.settings.model.image_size),
-                    ],
-                )
-
-                # Normalization values for ImageNet
-                normalize = transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225],
-                )
-
-            elif self.settings.data.dataset.lower() in ["cifar10", "cifar100"]:
-                # Base transforms for CIFAR
-                train_transform_list.extend(
-                    [
-                        transforms.RandomCrop(32, padding=4),
-                        transforms.Resize(self.settings.model.image_size),
-                        transforms.RandomHorizontalFlip(),
-                    ],
-                )
-                val_transform_list.extend(
-                    [
-                        transforms.Resize(self.settings.model.image_size),
-                    ],
-                )
-
-                # Normalization values for CIFAR
-                normalize = transforms.Normalize(
-                    mean=(0.5, 0.5, 0.5),
-                    std=(0.5, 0.5, 0.5),
-                )
-            else:
-                raise ValueError(f"Unsupported dataset: {self.settings.data.dataset}")
-
-            # Add augmentations if enabled
-            if self.settings.data.augmentation.enabled:
-                if self.settings.data.augmentation.color_jitter:
-                    train_transform_list.append(
-                        transforms.ColorJitter(
-                            brightness=self.settings.data.augmentation.color_jitter,
-                            contrast=self.settings.data.augmentation.color_jitter,
-                            saturation=self.settings.data.augmentation.color_jitter,
-                        ),
-                    )
-
-                if self.settings.data.augmentation.random_affine:
-                    train_transform_list.append(
-                        transforms.RandomAffine(
-                            degrees=15,
-                            translate=(0.1, 0.1),
-                        ),
-                    )
-
-                if self.settings.data.augmentation.cutout:
-                    train_transform_list.append(
-                        transforms.RandomErasing(
-                            p=0.5,
-                            scale=(0.02, 0.33),
-                            ratio=(0.3, 3.3),
-                        ),
-                    )
-
-                if self.settings.data.augmentation.auto_augment:
-                    if self.settings.data.dataset.lower() == "imagenet":
-                        train_transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET))
-                    elif self.settings.data.dataset.lower() in ["cifar10", "cifar100"]:
-                        train_transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10))
-
-            # Add final transforms
-            train_transform_list.extend([transforms.ToTensor(), normalize])
-            val_transform_list.extend([transforms.ToTensor(), normalize])
-
-            # Create transform compositions
-            train_transform = torch.nn.Sequential(*train_transform_list)
-            val_transform = torch.nn.Sequential(*val_transform_list)
-
+            train_transform, val_transform = self.get_transforms()
             train_transform.to(self.device)
             val_transform.to(self.device)
 
@@ -1155,46 +1068,16 @@ class Trainer:
         with open(finished_fname, "w") as f:
             f.write("1")
 
-    def get_transforms(self) -> tuple[transforms.Compose, transforms.Compose]:
+    def get_transforms(self) -> tuple[kornia.augmentation.AugmentationSequential, kornia.augmentation.AugmentationSequential]:
         """Get dataset-specific transforms"""
-        if self.settings.data.dataset.lower() == "imagenet":
-            train_transform = transforms.Compose(
-                [
-                    transforms.RandomResizedCrop(self.settings.model.image_size),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ColorJitter(0.4, 0.4, 0.4),
-                    transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-                ],
-            )
-            val_transform = transforms.Compose(
-                [
-                    transforms.Resize(256),
-                    transforms.CenterCrop(self.settings.model.image_size),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-                ],
-            )
-        elif self.settings.data.dataset.lower() in ["cifar10", "cifar100"]:
-            train_transform = transforms.Compose(
-                [
-                    transforms.RandomCrop(32, padding=4),
-                    transforms.Resize(self.settings.model.image_size),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                ],
-            )
-            val_transform = transforms.Compose(
-                [
-                    transforms.Resize(self.settings.model.image_size),
-                    transforms.ToTensor(),
-                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                ],
-            )
-        else:
-            raise ValueError(f"Unsupported dataset: {self.settings.data.dataset}")
+        train_transform_aug = kornia.augmentation.auto.AutoAugment(self.settings.data.dataset)
+        train_transform = kornia.augmentation.AugmentationSequential(
+            kornia.augmentation.Normalize(mean=0.5, std=0.5),
+            train_transform_aug, # type: ignore[]
+        )
+        val_transform = kornia.augmentation.AugmentationSequential(
+            kornia.augmentation.Normalize(mean=0.5, std=0.5),
+        ) # type: ignore[]
 
         return train_transform, val_transform
 
