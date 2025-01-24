@@ -1,4 +1,6 @@
-> ## [MIT License](https://opensource.org/license/mit)
+> **[MIT License](https://opensource.org/license/mit)**
+>
+> Copyright(c) 2024 Tibor Sloboda. All rights reserved.
 >
 > Permission is hereby granted, free of charge, to any person obtaining a
 > copy of this software and associated documentation files (the "Software"),
@@ -17,11 +19,13 @@
 > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 > FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 > DEALINGS IN THE SOFTWARE.
+>
+> Third-party licenses are listed in [THIRD_PARTY.txt](THIRD_PARTY.txt)
 
 # **nViT: Normalized Vision Transformer**
 Highly based on [original nGPT implementation](https://github.com/NVIDIA/ngpt)
 
-**Authors**: Tibor Sloboda (slobodaapl), 0x484558
+**Authors**: Tibor Sloboda ([slobodaapl](https://github.com/slobodaapl)), [0x484558](https://github.com/0x484558)
 
 **Affiliation**: STU Faculty of Informatics and Information Technology, NetFire
 
@@ -236,5 +240,3 @@ This framework effectively combines the benefits of:
 - Self-supervised learning (via reconstruction)
 
 The result is a vision transformer that maintains interpretable, normalized representations throughout its processing pipeline while capturing both local and global visual patterns.
-
----
