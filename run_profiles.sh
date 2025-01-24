@@ -10,7 +10,7 @@ while [[ $# -gt 0 ]]; do
             num_gpus="$2"
             shift 2
             ;;
-        --visible_gpus)
+        --visible-gpus)
             visible_gpus="$2"
             shift 2
             ;;
@@ -43,6 +43,6 @@ for env_file in "${env_files[@]}"; do
 
     ./docker_launcher.sh \
         --num-gpus "$num_gpus" \
-        --visible_gpus "$visible_gpus" \
+        --visible-gpus "$visible_gpus" \
         --env-file <(echo -e "${local_env}\n${profile_env}")
 done

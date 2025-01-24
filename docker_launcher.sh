@@ -13,7 +13,7 @@ while [[ $# -gt 0 ]]; do
             num_gpus="$2"
             shift 2
             ;;
-        --visible_gpus)
+        --visible-gpus)
             visible_gpus="$2"
             shift 2
             ;;
