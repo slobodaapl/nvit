@@ -9,7 +9,7 @@ env_file=".env"
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --num_gpus)
+        --num-gpus)
             num_gpus="$2"
             shift 2
             ;;
@@ -54,4 +54,4 @@ docker run --rm \
     --user ${USER_ID}:${GROUP_ID} \
     ${detached:+-d} \
     nvit:latest \
-    torchrun --nnodes 1 --nproc_per_node $num_gpus --rdzv_endpoint=localhost:29501 nvit/train.py
+    torchrun --nnodes 1 --nproc_per_node $num-gpus --rdzv_endpoint=localhost:29501 nvit/train.py

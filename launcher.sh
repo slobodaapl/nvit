@@ -2,7 +2,7 @@
 
 num_gpus=$1
 
-if [ -z "$num_gpus" ]; then
+if [ -z "$num-gpus" ]; then
     num_gpus=1
 fi
 
