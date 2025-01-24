@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import functools
 import gc
 import logging
@@ -11,13 +13,14 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union, cast
+from typing import Any, cast
 
 import numpy as np
 import psutil
 import torch
 import torch.distributed as dist
 import torchvision
+import wandb
 from dynaconf import Dynaconf
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
@@ -30,7 +33,6 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 from tqdm import tqdm
 
-import wandb
 from nvit.model import ViT, ViTConfig
 
 
@@ -90,18 +92,18 @@ class Trainer:
         self.val_loader: DataLoader
         self.ctx: Any
 
-        self.early_stopping_counter: Optional[int] = None
-        self.last_artifact_version: Optional[str] = None
-        self.best_val_loss: Optional[float] = None
-        self.ddp_rank: Optional[int] = None
-        self.ddp_local_rank: Optional[int] = None
-        self.ddp_world_size: Optional[int] = None
+        self.early_stopping_counter: int | None = None
+        self.last_artifact_version: str | None = None
+        self.best_val_loss: float | None = None
+        self.ddp_rank: int | None = None
+        self.ddp_local_rank: int | None = None
+        self.ddp_world_size: int | None = None
 
         self.iter_num: int = 0
         self.finished: bool = False
         self.master_process: bool = True
         self.seed_offset: int = 0
-        self.last_metrics: Dict[str, float] = {}
+        self.last_metrics: dict[str, float] = {}
 
         # Print all available cuda devices
         print(f"Available CUDA devices: {torch.cuda.device_count()}")
@@ -125,8 +127,8 @@ class Trainer:
             self.device,
         )
 
-        self.scheduler: Optional[_LRScheduler] = None
-        self.scaler: Optional[GradScaler] = None
+        self.scheduler: _LRScheduler | None = None
+        self.scaler: GradScaler | None = None
 
         # Setup AMP scaler if using mixed precision
         if self.settings.system.use_amp and self.settings.system.dtype in ["float16", "bfloat16"]:
@@ -173,7 +175,7 @@ class Trainer:
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
 
-    def validate_only(self) -> Dict[str, float]:
+    def validate_only(self) -> dict[str, float]:
         """Run validation only mode"""
         self.logger.info("Running in validation-only mode")
         self.train_loader, self.val_loader = self.get_data_loaders()
@@ -249,7 +251,7 @@ class Trainer:
 
         self.ctx = nullcontext() if device_type == "cpu" or not self.settings.system.use_amp else autocast(device_type=device_type, dtype=ptdtype)
 
-    def get_data_loaders(self) -> Tuple[DataLoader, DataLoader]:
+    def get_data_loaders(self) -> tuple[DataLoader, DataLoader]:
         """Initialize and return training and validation data loaders"""
         try:
             trainset = None
@@ -473,7 +475,7 @@ class Trainer:
                 "n_head": self.settings.model.n_head,
                 "n_embd": self.settings.model.n_embd,
                 "flash_attn": self.settings.model.flash_attn,
-                "use_nViT": self.settings.model.use_nViT,
+                "use_nvit": self.settings.model.use_nvit,
                 "dropout": self.settings.model.dropout,
                 "bias": self.settings.model.bias,
                 "num_classes": self.settings.model.num_classes,
@@ -531,8 +533,8 @@ class Trainer:
             raise
 
     def normalize_matrices(self) -> None:
-        """Normalize model matrices if using nViT"""
-        if not self.settings.model.use_nViT:
+        """Normalize model matrices if using nViT."""
+        if not self.settings.model.use_nvit:
             return
 
         def justnorm(x: torch.Tensor, idim: int = -1) -> torch.Tensor:
@@ -552,8 +554,8 @@ class Trainer:
             block.mlp_c_proj.weight.data.copy_(justnorm(block.mlp_c_proj.weight.data, 0))
 
     @torch.no_grad()
-    def estimate_loss(self) -> Dict[str, float]:
-        """Estimate loss on train and validation sets"""
+    def estimate_loss(self) -> dict[str, float]:
+        """Estimate loss on train and validation sets."""
         out = {}
         self.model.eval()
         for split, loader in [("train", self.train_loader), ("val", self.val_loader)]:
@@ -578,7 +580,7 @@ class Trainer:
         return out
 
     def setup_wandb(self) -> None:
-        """Initialize wandb logging"""
+        """Initialize wandb logging."""
         if not self.master_process or self.settings.wandb.mode not in ["online", "offline"]:
             return
 
@@ -617,7 +619,7 @@ class Trainer:
                 log_graph=False,  # Disable graph logging
             )
 
-    def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
+    def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
         """Log metrics to wandb with proper grouping"""
         if not self.master_process or wandb.run is None:
             return
@@ -632,7 +634,7 @@ class Trainer:
         wandb.log(grouped_metrics, step=step)
 
     @torch.no_grad()
-    def compute_accuracy(self, logits: torch.Tensor, targets: torch.Tensor) -> Tuple[float, float]:
+    def compute_accuracy(self, logits: torch.Tensor, targets: torch.Tensor) -> tuple[float, float]:
         """Compute top-1 and top-5 accuracy"""
         maxk = min(5, logits.size(1))  # top-5 or less if num_classes < 5
         batch_size = targets.size(0)
@@ -647,7 +649,7 @@ class Trainer:
         return top1_acc, top5_acc
 
     @torch.no_grad()
-    def validate(self) -> Dict[str, float]:
+    def validate(self) -> dict[str, float]:
         """Full validation loop with detailed metrics"""
         self.model.eval()
         val_loss = 0.0
@@ -698,7 +700,7 @@ class Trainer:
         self.model.train()
         return metrics
 
-    def save_checkpoint(self, iter_num: int, metrics: Dict[str, float], rng_state_pytorch: torch.Tensor) -> None:
+    def save_checkpoint(self, iter_num: int, metrics: dict[str, float], rng_state_pytorch: torch.Tensor) -> None:
         """Save model checkpoint with improved metadata and wandb artifact handling"""
         if not self.master_process:
             return
@@ -739,7 +741,7 @@ class Trainer:
             # Save to wandb if enabled
             if wandb.run is not None:
                 # Create artifact name with timestamp
-                artifact_name = f"model-{self.settings.wandb.run_name}-{'nvit' if self.settings.model.use_nViT else 'vit'}-{timestamp}"
+                artifact_name = f"model-{self.settings.wandb.run_name}-{'nvit' if self.settings.model.use_nvit else 'vit'}-{timestamp}"
 
                 # Create a wandb Artifact
                 artifact = wandb.Artifact(
@@ -750,7 +752,7 @@ class Trainer:
                         "val_loss": current_val_loss,
                         "metrics": metrics,
                         "timestamp": timestamp,
-                        "using_nvit": self.settings.model.use_nViT,
+                        "using_nvit": self.settings.model.use_nvit,
                     },
                 )
 
@@ -797,7 +799,7 @@ class Trainer:
 
         return self.early_stopping_counter >= self.settings.training.early_stopping_patience if hasattr(self.settings.training, "early_stopping_patience") else False
 
-    def evaluate(self) -> Dict[str, float]:
+    def evaluate(self) -> dict[str, float]:
         """Periodic evaluation with improved metrics"""
         rng_state_pytorch = torch.get_rng_state()
 
@@ -854,7 +856,7 @@ class Trainer:
             total_norm += param_norm.item() ** 2
         return total_norm**0.5
 
-    def get_memory_usage(self) -> Dict[str, float]:
+    def get_memory_usage(self) -> dict[str, float]:
         if not self.settings.system.log_memory:
             return {}
 
@@ -897,7 +899,7 @@ class Trainer:
             # Initialize progress bar if enabled
             if self.settings.system.use_tqdm and self.master_process:
                 pbar = tqdm(total=self.settings.training.max_iters, initial=self.iter_num, desc="Training")
-                postfix: Dict[str, Union[str, float, int]] | None = OrderedDict(
+                postfix: dict[str, str | float | int] | None = OrderedDict(
                     {
                         "loss": "+inf",
                         "lr": f"{self.settings.optimizer.learning_rate:.4e}",
@@ -1058,7 +1060,7 @@ class Trainer:
 
                         self.log_metrics(metrics)
 
-                    if self.settings.model.use_nViT:
+                    if self.settings.model.use_nvit:
                         self.normalize_matrices()
 
                     self.iter_num += 1
@@ -1108,14 +1110,14 @@ class Trainer:
 
     def get_hparams_str(self) -> str:
         """Get hyperparameter string for logging"""
-        if not self.settings.model.use_nViT:
+        if not self.settings.model.use_nvit:
             return ""
 
         model_obj = self.get_module(cast(ViT, self.model))
 
         resstr = (
             f"{torch.mean(model_obj.module.sz * (self.settings.model.sz_init_value / self.settings.model.sz_init_scaling)):.5f} "
-            if self.settings.model.use_nViT
+            if self.settings.model.use_nvit
             else "No sz, not using nViT"
         )
 
@@ -1132,7 +1134,7 @@ class Trainer:
 
         return resstr
 
-    def write_statistics(self, iter_num: int, lr: float, losses: Dict[str, float]) -> None:
+    def write_statistics(self, iter_num: int, lr: float, losses: dict[str, float]) -> None:
         """Write training statistics to file"""
         stat_fname = Path(self.settings.data.out_dir) / "stat"
         with open(stat_fname, "a" if self.settings.training.init_from == "resume" else "w") as f:
@@ -1150,7 +1152,7 @@ class Trainer:
         with open(finished_fname, "w") as f:
             f.write("1")
 
-    def get_transforms(self) -> Tuple[transforms.Compose, transforms.Compose]:
+    def get_transforms(self) -> tuple[transforms.Compose, transforms.Compose]:
         """Get dataset-specific transforms"""
         if self.settings.data.dataset.lower() == "imagenet":
             train_transform = transforms.Compose(
@@ -1237,7 +1239,7 @@ class Trainer:
         else:
             self.scheduler = scheduler  # type: ignore
 
-    def log_gpu_stats(self) -> Dict[str, float]:
+    def log_gpu_stats(self) -> dict[str, float]:
         """Log multi-GPU training statistics"""
         if not torch.cuda.is_available() or not self.ddp or not self.settings.system.use_ddp or not self.settings.system.log_gpu_stats:
             return {}
@@ -1281,7 +1283,7 @@ class Trainer:
         self.save_checkpoint(self.iter_num, {"train/loss": 0.0}, torch.get_rng_state())
         sys.exit(0)
 
-    def get_validation_subset(self, num_samples: Optional[int] = None) -> DataLoader:
+    def get_validation_subset(self, num_samples: int | None = None) -> DataLoader:
         """Create a subset of validation data for quick evaluation"""
         if not self.settings.system.quick_validation:
             return self.val_loader

@@ -5,21 +5,21 @@ training:
   eval_only: false
   always_save_checkpoint: true
   init_from: "scratch"
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 1
   batch_size: 512
   max_iters: 100000
   time_limit_seconds: 86400
-  max_iters_per_launch: 100000
+  max_iters_per_launch: 10000
   early_stopping_patience: 10
   save_numbered_checkpoints: false
   consistency_weight: 0.1
   smoothness_weight: 0.1
 
 optimizer:
-  learning_rate: 0.0005
+  learning_rate: 0.001
   min_lr: 1e-5
-  warmup_iters: 1000
-  lr_decay_iters: 10000
+  warmup_iters: 500
+  lr_decay_iters: 1000
   decay_lr: true
   weight_decay: 0.1
   beta1: 0.9
@@ -32,20 +32,20 @@ optimizer:
 
 model:
   image_size: 32
-  n_layer: 3
-  n_head: 4
-  n_embd: 128
-  use_nViT: 1
-  num_classes: 10
-  dropout: 0.05
+  n_layer: 2
+  n_head: 2
+  n_embd: 64
+  use_nvit: true
+  num_classes: 100
+  dropout: 0.15
   bias: true
   flash_attn: true
   sz_init_value: 1.00
   sz_init_scaling: 1.0
   local_patch_size: 8
   global_patch_size: 16
-  kohonen_nodes: 512
-  kohonen_alpha: 0.01
+  kohonen_nodes: 64
+  kohonen_alpha: 0.02
   use_kohonen: true
   reconstruction_weight: 0.5
   map_balance_weight: 0.25
@@ -80,11 +80,11 @@ wandb:
   run_name: "nvit_"
   save_artifacts: true
   artifact_description: "ViT model checkpoint"
-  artifact_name: "nvit_cifar10"
+  artifact_name: "nvit_cifar100"
 
 data:
   out_dir: "./out"
-  dataset: "cifar10"
+  dataset: "cifar100"
   checkpoint_dir: "./out"
   checkpoint_file: 'checkpoint_latest.pt'
   num_workers: 4

@@ -17,7 +17,7 @@ class ViTConfig:
     n_head: int = 12
     n_embd: int = 1024
     base_scale: float = 1.0 / (1024.0 ** 0.5)    # 1 / sqrt(n_embd)
-    use_nViT: int = 0
+    use_nvit: bool = False
     flash_attn: bool = False
     sz_init_value: float = 1.00
     sz_init_scaling: float = 1.0
@@ -29,10 +29,10 @@ class ViTConfig:
     global_patch_size: int = 16  # Size of global patches
     kohonen_nodes: int = 512  # Total number of Kohonen nodes
     kohonen_alpha: float = 0.01  # Learning rate for Kohonen maps
-    use_kohonen: bool = True
+    use_kohonen: bool = False
     reconstruction_weight: float = 0.1
     map_balance_weight: float = 0.5  # Learnable weight between local/global maps
-    kohonen_scheduler_enabled: bool = True
+    kohonen_scheduler_enabled: bool = False
     kohonen_scheduler_warmup_steps: int = 1000
     kohonen_scheduler_decay_steps: int = 10000
     kohonen_scheduler_min_lr: float = 0.001
@@ -60,11 +60,11 @@ class Block(nn.Module):
         self.silu = nn.SiLU()
         self.mlp_c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
 
-        if (config.use_nViT == 0):
+        if config.use_nvit:
             self.rmsnorm_att = RMSNorm(config.n_embd)
             self.rmsnorm_mlp = RMSNorm(config.n_embd)
 
-        if (config.use_nViT == 1):
+        if config.use_nvit:
             self.attn_alpha_init_value = torch.scalar_tensor(0.05, dtype=torch.float32)
             self.attn_alpha_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
             self.attn_alpha = torch.nn.Parameter(self.attn_alpha_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
@@ -92,7 +92,7 @@ class Block(nn.Module):
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         _, _, C = h.size()  # batch, sequence_length, embedding_dim
 
-        if (self.config.use_nViT == 0):
+        if not self.config.use_nvit:
             h = self.rmsnorm_att(h)
 
         # Project to q, k, v
@@ -105,7 +105,7 @@ class Block(nn.Module):
         k = rearrange(k, "b t (h d) -> b h t d", h=self.config.n_head)
         v = rearrange(v, "b t (h d) -> b h t d", h=self.config.n_head)
 
-        if (self.config.use_nViT == 1):
+        if self.config.use_nvit:
             sqk = (self.sqk * (self.sqk_init_value/self.sqk_init_scaling))
             sqk = rearrange(sqk, "(h d) -> 1 h 1 d", h=self.config.n_head)
             q = sqk * self.justnorm(q)
@@ -113,7 +113,7 @@ class Block(nn.Module):
 
         head_size = C // self.config.n_head
         sqrt_head_dim = head_size ** 0.5
-        softmax_scale = 1.0 / sqrt_head_dim if self.config.use_nViT == 0 else sqrt_head_dim
+        softmax_scale = 1.0 / sqrt_head_dim if not self.config.use_nvit else sqrt_head_dim
 
         q = q.to(v.dtype)
         k = k.to(v.dtype)
@@ -129,9 +129,9 @@ class Block(nn.Module):
         # Project attention output
         h_att = self.att_c_proj(h_att)
 
-        if (self.config.use_nViT == 0):
+        if not self.config.use_nvit:
             h = h + h_att
-        if (self.config.use_nViT == 1):
+        if self.config.use_nvit:
             lr = self.attn_alpha * (self.attn_alpha_init_value / self.attn_alpha_init_scaling)
             lr = torch.abs(lr)
 
@@ -142,11 +142,11 @@ class Block(nn.Module):
             h = self.justnorm(res)
 
         # MLP block
-        if (self.config.use_nViT == 0):
+        if not self.config.use_nvit:
             h = self.rmsnorm_mlp(h)
 
         uv = self.c_fc(h)
-        if (self.config.use_nViT == 1):
+        if self.config.use_nvit:
             suv = (self.suv * ((self.suv_init_value/self.suv_init_scaling) * (self.config.n_embd ** 0.5)))
             uv = suv * uv
 
@@ -154,9 +154,9 @@ class Block(nn.Module):
         x_mlp = u * self.silu(v)
         h_mlp = self.mlp_c_proj(x_mlp)
 
-        if (self.config.use_nViT == 0):
+        if not self.config.use_nvit:
             h = h + h_mlp
-        if (self.config.use_nViT == 1):
+        if self.config.use_nvit:
             lr = self.mlp_alpha * (self.mlp_alpha_init_value / self.mlp_alpha_init_scaling)
             lr = torch.abs(lr)
 
@@ -192,7 +192,7 @@ class CrossAttentionBlock(nn.Module):
         self.config = config
 
         # Normalization layers
-        if config.use_nViT == 0:
+        if not config.use_nvit:
             self.local_norm = RMSNorm(config.n_embd)
             self.global_norm = RMSNorm(config.n_embd)
 
@@ -205,7 +205,7 @@ class CrossAttentionBlock(nn.Module):
         self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
         # nViT specific parameters
-        if config.use_nViT == 1:
+        if config.use_nvit:
             # Attention parameters
             self.attn_alpha_init_value = torch.scalar_tensor(0.05, dtype=torch.float32)
             self.attn_alpha_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
@@ -218,7 +218,7 @@ class CrossAttentionBlock(nn.Module):
 
     def forward(self, local: torch.Tensor, global_: torch.Tensor) -> torch.Tensor:
         # Apply normalization based on mode
-        if self.config.use_nViT == 0:
+        if not self.config.use_nvit:
             local = self.local_norm(local)
             global_ = self.global_norm(global_)
 
@@ -233,7 +233,7 @@ class CrossAttentionBlock(nn.Module):
         v = rearrange(v, "b t (h d) -> b h t d", h=self.config.n_head)
 
         # Apply nViT normalization and scaling
-        if self.config.use_nViT == 1:
+        if self.config.use_nvit:
             sqk = (self.sqk * (self.sqk_init_value / self.sqk_init_scaling))
             sqk = rearrange(sqk, "(h d) -> 1 h 1 d", h=self.config.n_head)
             q = sqk * justnorm(q)
@@ -242,7 +242,7 @@ class CrossAttentionBlock(nn.Module):
         # Cross attention with appropriate scaling
         head_size = self.config.n_embd // self.config.n_head
         sqrt_head_dim = head_size ** 0.5
-        softmax_scale = 1.0 / sqrt_head_dim if self.config.use_nViT == 0 else sqrt_head_dim
+        softmax_scale = 1.0 / sqrt_head_dim if not self.config.use_nvit else sqrt_head_dim
 
         # Ensure same dtype
         q = q.to(v.dtype)
@@ -262,7 +262,7 @@ class CrossAttentionBlock(nn.Module):
         out = self.out_proj(out)
 
         # Apply nViT learning rate and normalization
-        if self.config.use_nViT == 1:
+        if self.config.use_nvit:
             lr = self.attn_alpha * (self.attn_alpha_init_value / self.attn_alpha_init_scaling)
             lr = torch.abs(lr)
 
@@ -343,7 +343,7 @@ class ViT(nn.Module):
             nn.Linear(config.n_embd, config.num_classes),
         )
 
-        if self.config.use_nViT == 1:
+        if self.config.use_nvit:
             self.sz = torch.nn.Parameter(
                 self.config.sz_init_scaling * torch.ones(config.num_classes, dtype=torch.float32),
             )
@@ -363,13 +363,13 @@ class ViT(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             torch.nn.init.zeros_(module.bias)
             torch.nn.init.ones_(module.weight)
-        if self.config.use_nViT == 1 and isinstance(module, nn.Linear):
+        if self.config.use_nvit and isinstance(module, nn.Linear):
             torch.nn.init.constant_(self.sz, self.config.sz_init_value)
 
     def configure_optimizers(self, weight_decay: float, learning_rate: float, betas: tuple[float, float], device_type: str) -> torch.optim.AdamW:
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
 
-        if self.config.use_nViT == 1:
+        if self.config.use_nvit:
             optimizer_grouped_parameters = [
                 {"params": [p for n, p in param_dict.items() if "sz" not in n and p.dim() >= 2], "weight_decay": weight_decay},
                 {"params": [p for n, p in param_dict.items() if "sz" not in n and p.dim() < 2], "weight_decay": 0.0},
@@ -463,7 +463,7 @@ class ViT(nn.Module):
                    .reshape(reconstructed.shape)
         aux_losses["reconstruction"] = F.mse_loss(reconstructed, target)
 
-        if self.config.use_nViT == 1:
+        if self.config.use_nvit:
             sz = self.sz * (self.config.sz_init_value / self.config.sz_init_scaling)
             logits = sz * logits
 

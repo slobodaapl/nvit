@@ -246,7 +246,7 @@ def debug_model(settings_path: str = "settings.yaml", secrets_path: str = "secre
         n_layer=settings.model.n_layer,
         n_head=settings.model.n_head,
         n_embd=settings.model.n_embd,
-        use_nViT=settings.model.use_nViT,
+        use_nvit=settings.model.use_nvit,
         flash_attn=settings.model.flash_attn,
         dropout=settings.model.dropout,
         bias=settings.model.bias,
