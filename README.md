@@ -72,17 +72,17 @@ You can use `just docker-build` to build the Docker image (or `build.ps1` in the
 just train [FLAGS]
 
 # Supported flags:
---gpus=N            Number of GPUs to use
+--num_gpus=N            Number of GPUs to use
 --visible-gpus=LIST Specific GPUs to use (e.g., "0,1")
 --session=NAME      tmux session name
 -d, --detach        Run in background (tmux)
 
 # Examples:
 just train                      # Use defaults, run in foreground
-just train --gpus=4             # Use 4 GPUs
+just train --num_gpus=4         # Use 4 GPUs
 just train --visible-gpus="0,1" # Specific GPUs
 just train -d                   # Run in background
-just train --gpus=2 -d          # Combined usage
+just train --num_gpus=2 -d      # Combined usage
 ```
 
 #### **Profile-based Training:**
@@ -91,9 +91,9 @@ It is possible to run training on a number of different configurations defined a
 
 ```bash
 profiles/
-  ├── experiment1.env  # e.g., BATCH_SIZE=32, LEARNING_RATE=0.001
-  ├── experiment2.env  # e.g., BATCH_SIZE=64, LEARNING_RATE=0.0005
-  └── experiment3.env  # e.g., BATCH_SIZE=128, LEARNING_RATE=0.0001
+  ├── experiment1.env
+  ├── experiment2.env
+  └── experiment3.env
 ```
 
 Use `just run-profiles` to run training for all profiles. The training script will create a detached tmux session and run the training for each profile.
@@ -102,14 +102,14 @@ Use `just run-profiles` to run training for all profiles. The training script wi
 just run-profiles [FLAGS]
 
 # Supported flags:
---gpus=N           Number of GPUs to use
+--num_gpus=N           Number of GPUs to use
 --visible-gpus=LIST Specific GPUs to use
 --profiles-dir=DIR Directory containing .env files
 --session=NAME     tmux session name
 
 # Examples:
 just run-profiles                       # Use defaults
-just run-profiles --gpus=4              # Use 4 GPUs
+just run-profiles --num_gpus=4          # Use 4 GPUs
 just run-profiles --visible-gpus="0,1"  # Specific GPUs
 just run-profiles --profiles-dir=exp    # Custom directory
 ```
