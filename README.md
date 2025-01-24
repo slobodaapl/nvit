@@ -40,14 +40,91 @@ The main components are:
 
 ## **Getting Started**
 
+Before you start, make sure you have the following system-level dependencies installed:
+
+1. [**just**](https://just.systems/) - command runner.
+   - Ubuntu/Debian: `sudo apt-get install just`
+   - macOS: `brew install just`
+   - Windows: `winget install just`
+   - Cargo (if you happen to have [Rust](https://rustup.rs)): `cargo install just`
+2. **tmux** - terminal multiplexer (recommended for long-running jobs).
+   - Ubuntu/Debian: `sudo apt-get install tmux`
+   - macOS: `brew install tmux`
+   - Windows: Available through WSL
+3. **Poetry** - Python dependency manager.
+
+Install project dependencies with `poetry install` before proceeding further.
+
 ### **Running the Code**
 
-Install dependencies with `poetry install`
+To start the training process with defined hyperparameters, run `./launcher.sh` (or `just train-local` alias).
+You can specify the number of GPUs to use as an argument: `./launcher.sh 8` (or `just train-local 8`).
 
-To start the training process with defined hyperparameters, execute `launcher.sh`.
-You can specify the number of GPUs to use as an argument: `./launcher.sh 8`
+If you are using Windows, you should use `docker_launcher.ps1` instead. For that, you need to build the Docker image first.
 
-If you are using Windows, you can use `docker_launcher.ps1` instead, in which case you need to build the Docker image first with `build.sh` or `build.ps1` in the `docker` directory. The docker launcher has both Linux (bash) and Windows (PowerShell) variants.
+#### **Training with Docker**
+
+You can use `just docker-build` to build the Docker image (or `build.ps1` in the [`docker`](docker/) directory if you are using Windows). After building the container, you can run the training manually with previously mentioned `docker_launcher.ps1` script if you are using Windows. For Linux or WSL, `just train` runs `docker_launcher.sh` - but there is flexibility:
+
+```bash
+just train [FLAGS]
+
+# Supported flags:
+--gpus=N            Number of GPUs to use
+--visible-gpus=LIST Specific GPUs to use (e.g., "0,1")
+--session=NAME      tmux session name
+-d, --detach        Run in background (tmux)
+
+# Examples:
+just train                      # Use defaults, run in foreground
+just train --gpus=4             # Use 4 GPUs
+just train --visible-gpus="0,1" # Specific GPUs
+just train -d                   # Run in background
+just train --gpus=2 --lr=0.1 -d # Combined usage
+```
+
+#### **Profile-based Training:**
+
+It is possible to run training on a number of different configurations defined as `*.env` files in the [`profiles`](profiles/) directory.
+
+```bash
+profiles/
+  ├── experiment1.env  # e.g., BATCH_SIZE=32, LEARNING_RATE=0.001
+  ├── experiment2.env  # e.g., BATCH_SIZE=64, LEARNING_RATE=0.0005
+  └── experiment3.env  # e.g., BATCH_SIZE=128, LEARNING_RATE=0.0001
+```
+
+Use `just run-profiles` to run training for all profiles. The training script will create a detached tmux session and run the training for each profile.
+
+```bash
+just run-profiles [FLAGS]
+
+# Supported flags:
+--gpus=N           Number of GPUs to use
+--visible-gpus=LIST Specific GPUs to use
+--profiles-dir=DIR Directory containing .env files
+--session=NAME     tmux session name
+
+# Examples:
+just run-profiles                       # Use defaults
+just run-profiles --gpus=4              # Use 4 GPUs
+just run-profiles --visible-gpus="0,1"  # Specific GPUs
+just run-profiles --profiles-dir=exp    # Custom directory
+```
+
+If you need to specify common environment variables for all profiles, you can do by creating a `.env` file (without anything before the dot) in the root of this repository.
+
+#### **Working with tmux Sessions**
+
+```bash
+# View running session
+tmux attach -t nvit
+
+# Inside tmux:
+Ctrl+B, D # Detach from session
+Ctrl+B, [ # Enter scroll mode (use arrow keys)
+q         # Exit scroll mode
+```
 
 ### **Implementation Details**
 
@@ -94,7 +171,7 @@ The training objective combines several losses with adjustable weights:
 2. **Quantization Loss**
    - Ensures mapped representations stay close to original patches
 
-   $\mathcal{L}_{quant} = \lambda_{lq} \|K_l(P_l) - P_l\|_2^2 + \lambda_{gq} \|K_g(P_g) - P_g\|_2^2$
+   $\mathcal{L}_{quant} = \lambda _{lq} \|K_l(P_l) - P_l\|_2^2 + \lambda _{gq} \|K_g(P_g) - P_g\|_2^2$
    
    where $K_l$ and $K_g$ are local and global Kohonen maps
    $\lambda_{lq} = \lambda_{gq} = 0.1$ (default weights)
@@ -126,7 +203,7 @@ The training objective combines several losses with adjustable weights:
 
 The final loss combines all components:
 
-$\mathcal{L}_{total} = \mathcal{L}_{cls} + \mathcal{L}_{quant} + \mathcal{L}_{cons} + \mathcal{L}_{smooth} + \mathcal{L}_{rec}$
+$\mathcal{L}_{total} = \mathcal{L} _{cls} + \mathcal{L} _{quant} + \mathcal{L} _{cons} + \mathcal{L} _{smooth} + \mathcal{L} _{rec}$
 
 #### **Training Dynamics**
 

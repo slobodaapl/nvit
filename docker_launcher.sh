@@ -4,11 +4,7 @@
 num_gpus=1
 visible_gpus="all"
 detached=false
-
-# Load environment variables from .env file if it exists
-if [ -f .env ]; then
-    export $(cat .env | xargs)
-fi
+env_file=".env"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -19,6 +15,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --visible_gpus)
             visible_gpus="$2"
+            shift 2
+            ;;
+        --env-file)
+            env_file="$2"
             shift 2
             ;;
         -d|--detached)
@@ -36,14 +36,12 @@ done
 USER_ID=$(id -u)
 GROUP_ID=$(id -g)
 
-# Build docker run command
-docker_cmd="docker run --rm"
-if [ "$detached" = true ]; then
-    docker_cmd="$docker_cmd -d"
+if ! [[ -f "$env_file" || -p "$env_file" ]]; then
+    echo "Warning: Environment file $env_file does not exist or is not accessible"
 fi
 
 # Run docker container with local directory mounted and execute training command
-$docker_cmd \
+docker run --rm \
     --gpus "\"device=$visible_gpus\"" \
     -v $(pwd):/app \
     -w /app \
@@ -51,7 +49,8 @@ $docker_cmd \
     -e TORCHINDUCTOR_CACHE_DIR=/app/.cache \
     -e NCCL_TIMEOUT=1200 \
     -e NCCL_DEBUG=INFO \
-    --env-file .env \
+    --env-file "$env_file" \
     --user ${USER_ID}:${GROUP_ID} \
+    ${detached:+-d} \
     nvit:latest \
     torchrun --nnodes 1 --nproc_per_node $num_gpus --rdzv_endpoint=localhost:29501 nvit/train.py
