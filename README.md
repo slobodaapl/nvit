@@ -124,7 +124,7 @@ If you need to specify common environment variables for all profiles, you can do
 
 ```bash
 # View running session
-tmux attach -t nvit
+just attach # alternative: tmux attach -t nvit
 
 # Inside tmux:
 Ctrl+B, D # Detach from session
