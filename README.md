@@ -82,7 +82,7 @@ just train                      # Use defaults, run in foreground
 just train --gpus=4             # Use 4 GPUs
 just train --visible-gpus="0,1" # Specific GPUs
 just train -d                   # Run in background
-just train --gpus=2 --lr=0.1 -d # Combined usage
+just train --gpus=2 -d          # Combined usage
 ```
 
 #### **Profile-based Training:**
