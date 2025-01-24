@@ -259,9 +259,12 @@ class Trainer:
             trainset = None
             valset = None
 
-            train_transform, val_transform = self.get_transforms()
-            train_transform.to(self.device)
-            val_transform.to(self.device)
+            train_transform_diff, val_transform_diff = self.get_transforms()
+            train_transform_diff.to(self.device)
+            val_transform_diff.to(self.device)
+            to_tensor = torchvision.transforms.ToTensor()
+            train_transform = lambda x: train_transform_diff(to_tensor(x).to(self.device))
+            val_transform = lambda x: val_transform_diff(to_tensor(x).to(self.device))
 
             # Create datasets
             if self.settings.data.dataset.lower() == "imagenet":
