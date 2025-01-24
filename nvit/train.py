@@ -266,12 +266,10 @@ class Trainer:
             # Create a composed transform that handles both conversion and device movement
             train_transform = torchvision.transforms.Compose([
                 torchvision.transforms.ToTensor(),
-                lambda x: x.to(self.device),
                 train_transform_diff,
             ])
             val_transform = torchvision.transforms.Compose([
                 torchvision.transforms.ToTensor(),
-                lambda x: x.to(self.device),
                 val_transform_diff,
             ])
 
