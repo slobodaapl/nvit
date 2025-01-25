@@ -259,19 +259,95 @@ class Trainer:
             trainset = None
             valset = None
 
-            train_transform_diff, val_transform_diff = self.get_transforms()
-            train_transform_diff = train_transform_diff.to(self.device)
-            val_transform_diff = val_transform_diff.to(self.device)
+            # Get base transforms
+            train_transform_list = []
+            val_transform_list = []
 
-            # Create a composed transform that handles both conversion and device movement
-            train_transform = torchvision.transforms.Compose([
-                torchvision.transforms.ToTensor(),
-                train_transform_diff,
-            ])
-            val_transform = torchvision.transforms.Compose([
-                torchvision.transforms.ToTensor(),
-                val_transform_diff,
-            ])
+            if self.settings.data.dataset.lower() == "imagenet":
+                # Base transforms for ImageNet
+                train_transform_list.extend(
+                    [
+                        transforms.RandomResizedCrop(self.settings.model.image_size),
+                        transforms.RandomHorizontalFlip(),
+                    ],
+                )
+                val_transform_list.extend(
+                    [
+                        transforms.Resize(256),
+                        transforms.CenterCrop(self.settings.model.image_size),
+                    ],
+                )
+
+                # Normalization values for ImageNet
+                normalize = transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225],
+                )
+
+            elif self.settings.data.dataset.lower() in ["cifar10", "cifar100"]:
+                # Base transforms for CIFAR
+                train_transform_list.extend(
+                    [
+                        transforms.RandomCrop(32, padding=4),
+                        transforms.Resize(self.settings.model.image_size),
+                        transforms.RandomHorizontalFlip(),
+                    ],
+                )
+                val_transform_list.extend(
+                    [
+                        transforms.Resize(self.settings.model.image_size),
+                    ],
+                )
+
+                # Normalization values for CIFAR
+                normalize = transforms.Normalize(
+                    mean=(0.5, 0.5, 0.5),
+                    std=(0.5, 0.5, 0.5),
+                )
+            else:
+                raise ValueError(f"Unsupported dataset: {self.settings.data.dataset}")
+
+            # Add augmentations if enabled
+            if self.settings.data.augmentation.enabled:
+                if self.settings.data.augmentation.color_jitter:
+                    train_transform_list.append(
+                        transforms.ColorJitter(
+                            brightness=self.settings.data.augmentation.color_jitter,
+                            contrast=self.settings.data.augmentation.color_jitter,
+                            saturation=self.settings.data.augmentation.color_jitter,
+                        ),
+                    )
+
+                if self.settings.data.augmentation.random_affine:
+                    train_transform_list.append(
+                        transforms.RandomAffine(
+                            degrees=15,
+                            translate=(0.1, 0.1),
+                        ),
+                    )
+
+                if self.settings.data.augmentation.cutout:
+                    train_transform_list.append(
+                        transforms.RandomErasing(
+                            p=0.5,
+                            scale=(0.02, 0.33),
+                            ratio=(0.3, 3.3),
+                        ),
+                    )
+
+                if self.settings.data.augmentation.auto_augment:
+                    if self.settings.data.dataset.lower() == "imagenet":
+                        train_transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET))
+                    else:
+                        train_transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10))
+
+            # Add final transforms
+            train_transform_list.extend([transforms.ToTensor(), normalize])
+            val_transform_list.extend([transforms.ToTensor(), normalize])
+
+            # Create transform compositions
+            train_transform = transforms.Compose(train_transform_list)
+            val_transform = transforms.Compose(val_transform_list)
 
             # Create datasets
             if self.settings.data.dataset.lower() == "imagenet":
