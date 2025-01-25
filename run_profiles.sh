@@ -50,5 +50,5 @@ for env_file in "${env_files[@]}"; do
         --num-gpus "$num_gpus" \
         --visible-gpus "$visible_gpus" \
         --env-file <(echo -e "${local_env}\n${profile_env}") \
-        ${remove_container:+--no-rm-container}
+        ${remove_container:+--no-rm}
 done

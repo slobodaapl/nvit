@@ -92,7 +92,7 @@ class Block(nn.Module):
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         _, _, C = h.size()  # batch, sequence_length, embedding_dim
 
-        if not self.config.use_nvit:
+        if self.config.use_nvit:
             h = self.rmsnorm_att(h)
 
         # Project to q, k, v
