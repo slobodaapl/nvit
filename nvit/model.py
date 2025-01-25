@@ -142,7 +142,7 @@ class Block(nn.Module):
             h = self.justnorm(res)
 
         # MLP block
-        if not self.config.use_nvit:
+        if self.config.use_nvit:
             h = self.rmsnorm_mlp(h)
 
         uv = self.c_fc(h)
