@@ -534,26 +534,28 @@ class Trainer:
             self.logger.error(f"Failed to initialize model: {e}")
             raise
 
+    @staticmethod
+    def justnorm(x: torch.Tensor, idim: int = -1) -> torch.Tensor:
+            dtype = x.dtype
+            x = x.float()
+            return (x / x.norm(p=2, dim=idim, keepdim=True)).to(dtype=dtype)
+
+    @torch.no_grad()
     def normalize_matrices(self) -> None:
         """Normalize model matrices if using nViT."""
         if not self.settings.model.use_nvit:
             return
 
-        def justnorm(x: torch.Tensor, idim: int = -1) -> torch.Tensor:
-            dtype = x.dtype
-            x = x.float()
-            return (x / x.norm(p=2, dim=idim, keepdim=True)).to(dtype=dtype)
-
         model_obj = self.get_module(cast(ViT, self.model))
 
         # Normalize transformer blocks
         for block in model_obj.transformer.h:
-            block.query.weight.data.copy_(justnorm(block.query.weight.data, 1))
-            block.key.weight.data.copy_(justnorm(block.key.weight.data, 1))
-            block.value.weight.data.copy_(justnorm(block.value.weight.data, 1))
-            block.att_c_proj.weight.data.copy_(justnorm(block.att_c_proj.weight.data, 0))
-            block.c_fc.weight.data.copy_(justnorm(block.c_fc.weight.data, 1))
-            block.mlp_c_proj.weight.data.copy_(justnorm(block.mlp_c_proj.weight.data, 0))
+            block.query.weight.data = self.justnorm(block.query.weight.data, 1)
+            block.key.weight.data = self.justnorm(block.key.weight.data, 1)
+            block.value.weight.data = self.justnorm(block.value.weight.data, 1)
+            block.att_c_proj.weight.data = self.justnorm(block.att_c_proj.weight.data, 0)
+            block.c_fc.weight.data = self.justnorm(block.c_fc.weight.data, 1)
+            block.mlp_c_proj.weight.data = self.justnorm(block.mlp_c_proj.weight.data, 0)
 
     @torch.no_grad()
     def estimate_loss(self) -> dict[str, float]:
@@ -1046,6 +1048,10 @@ class Trainer:
                 if self.scheduler is not None:
                     self.scheduler.step()
 
+                # Apply nViT normalization after optimizer step
+                if self.settings.model.use_nvit:
+                    self.normalize_matrices()
+
                 # Timing and logging
                 t1 = time.time()
                 dt = t1 - t0
@@ -1088,9 +1094,6 @@ class Trainer:
                         metrics.update(kohonen_metrics)
 
                     self.log_metrics(metrics)
-
-                if self.settings.model.use_nvit:
-                    self.normalize_matrices()
 
                 self.iter_num += 1
                 local_iter_num += 1
