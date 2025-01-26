@@ -809,33 +809,57 @@ class Trainer:
         val_metrics = self.validate()
         train_loss = self.estimate_loss()["train"]
 
-        metrics = {
-            "train/loss": train_loss,  # Changed from "train" to "train/loss"
+        # Initialize metrics with known float values
+        metrics = cast(dict[str, float], {
+            "train/loss": train_loss,
             "val/loss": val_metrics["val/loss"],
             "val/top1_accuracy": val_metrics["val/top1_accuracy"],
             "val/top5_accuracy": val_metrics["val/top5_accuracy"],
             "optimizer/learning_rate": self.get_lr(self.iter_num) if self.settings.optimizer.decay_lr else self.settings.optimizer.learning_rate,
             "training/global_step": self.iter_num,
-        }
+        })
 
-        # Store metrics for later use
-        self.last_metrics = metrics.copy()
+        # Add Kohonen-specific metrics if using Kohonen
+        if self.model.config.use_kohonen and all(k in val_metrics for k in ["val/consistency_loss", "val/smoothness_loss", "val/local_quantization_loss", "val/global_quantization_loss"]):
+            kohonen_metrics = cast(dict[str, float], {
+                "val/consistency_loss": val_metrics["val/consistency_loss"],
+                "val/smoothness_loss": val_metrics["val/smoothness_loss"],
+                "val/local_quantization_loss": val_metrics["val/local_quantization_loss"],
+                "val/global_quantization_loss": val_metrics["val/global_quantization_loss"],
+            })
+            metrics.update(kohonen_metrics)
 
         # Add model statistics
         if hasattr(self.model, "parameters"):
             metrics["model/gradient_norm"] = self.compute_gradient_norm()
         metrics["model/parameter_norm"] = self.compute_parameter_norm()
 
+        # Add memory usage metrics if enabled
+        if self.settings.system.log_memory:
+            memory_stats = self.get_memory_usage()
+            if memory_stats:  # Only update if we got stats
+                memory_metrics = cast(dict[str, float], {f"memory/{k}": float(v) for k, v in memory_stats.items()})
+                metrics.update(memory_metrics)
+
+        # Add GPU statistics if enabled
+        gpu_stats = self.log_gpu_stats()
+        if gpu_stats:  # Only update if we got stats
+            gpu_metrics = cast(dict[str, float], {k: float(v) for k, v in gpu_stats.items()})
+            metrics.update(gpu_metrics)
+
+        # Store metrics for later use
+        self.last_metrics = metrics.copy()
+
         # Log metrics to wandb
-        if self.master_process:
-            self.log_metrics(metrics)
+        if self.master_process and wandb.run is not None:
+            self.log_metrics(metrics, step=self.iter_num)
 
         # Check for early stopping
-        if self.should_stop_early(metrics["val/loss"]):  # Updated key
+        if self.should_stop_early(metrics["val/loss"]):
             self.logger.info("Early stopping triggered!")
             self.mark_training_finished()
 
-        # Save checkpoint
+        # Save checkpoint if configured
         if self.settings.training.always_save_checkpoint and self.iter_num > 0:
             self.save_checkpoint(self.iter_num, metrics, rng_state_pytorch)
 
@@ -901,7 +925,7 @@ class Trainer:
             # Initialize progress bar if enabled
             if self.settings.system.use_tqdm and self.master_process:
                 pbar = tqdm(total=self.settings.training.max_iters, initial=self.iter_num, desc="Training")
-                postfix: dict[str, str | float | int] | None = OrderedDict(
+                postfix: dict[str, Any] = OrderedDict(
                     {
                         "loss": "+inf",
                         "lr": f"{self.settings.optimizer.learning_rate:.4e}",
@@ -909,8 +933,8 @@ class Trainer:
                     },
                 )
             else:
-                pbar = None
-                postfix = None
+                pbar = None # type: ignore[assignment]
+                postfix = None # type: ignore[assignment]
 
             # Initialize training state
             local_iter_num = 0
@@ -919,7 +943,7 @@ class Trainer:
             # Initialize stats file if starting from scratch
             if self.master_process and self.settings.training.init_from == "scratch":
                 stat_fname = Path(self.settings.data.out_dir) / "stat"
-                with open(stat_fname, "w") as f:
+                with Path.open(stat_fname, "w") as f:
                     resstr = f"{0:.6e} {0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0.0:.4e} {0:.4e} {0.0:.4e}"
                     resstr = resstr + self.get_hparams_str() + "\n"
                     f.write(resstr)
@@ -929,6 +953,8 @@ class Trainer:
 
             # Calculate total epochs based on max_iters and dataset size
             current_epoch = math.floor(self.iter_num / len(self.train_loader))
+            train_iterator = iter(self.train_loader)
+            X, y = next(train_iterator)
 
             while (
                 local_iter_num < self.settings.training.max_iters_per_launch
@@ -957,136 +983,140 @@ class Trainer:
                     # Write statistics
                     self.write_statistics(self.iter_num, lr, losses)
 
-                # Training step
-                for X, y in self.train_loader:
-                    if self.settings.system.device == "cuda":
-                        X = X.pin_memory().to(self.device, non_blocking=True)
-                        y = y.pin_memory().to(self.device, non_blocking=True)
-                    else:
-                        X, y = X.to(self.device), y.to(self.device)
+                if self.settings.system.device == "cuda":
+                    X = X.pin_memory().to(self.device, non_blocking=True)
+                    y = y.pin_memory().to(self.device, non_blocking=True)
+                else:
+                    X, y = X.to(self.device), y.to(self.device)
 
-                    total_loss = torch.tensor(torch.inf, device=self.device)
-                    consistency_loss = torch.tensor(torch.inf, device=self.device)
-                    smoothness_loss = torch.tensor(torch.inf, device=self.device)
-                    local_quantization_loss = torch.tensor(torch.inf, device=self.device)
-                    global_quantization_loss = torch.tensor(torch.inf, device=self.device)
+                total_loss = torch.tensor(torch.inf, device=self.device)
+                consistency_loss = torch.tensor(torch.inf, device=self.device)
+                smoothness_loss = torch.tensor(torch.inf, device=self.device)
+                local_quantization_loss = torch.tensor(torch.inf, device=self.device)
+                global_quantization_loss = torch.tensor(torch.inf, device=self.device)
 
-                    for micro_step in range(self.settings.training.gradient_accumulation_steps):
-                        if isinstance(self._model, DDP) and micro_step < self.settings.training.gradient_accumulation_steps - 1:
-                            context = self._model.no_sync()
-                        else:
-                            context = nullcontext()
+                for micro_step in range(self.settings.training.gradient_accumulation_steps):
+                    context = self._model.no_sync() if isinstance(self._model, DDP) and micro_step < self.settings.training.gradient_accumulation_steps - 1 else nullcontext()
 
-                        with context, self.ctx:
-                            logits, aux_losses = self.model(X)
-                            class_loss = F.cross_entropy(logits, y)
-                            total_loss = class_loss
+                    with context, self.ctx:
+                        logits, aux_losses = self.model(X)
+                        class_loss = F.cross_entropy(logits, y)
+                        total_loss = class_loss
 
-                            if self.model.config.use_kohonen:
-                                # Add consistency loss
-                                consistency_loss = aux_losses["kohonen_consistency"]
-                                total_loss += self.settings.training.consistency_weight * consistency_loss
+                        if self.model.config.use_kohonen:
+                            # Add consistency loss
+                            consistency_loss = aux_losses["kohonen_consistency"]
+                            total_loss += self.settings.training.consistency_weight * consistency_loss
 
-                                # Add smoothness loss
-                                smoothness_loss = aux_losses["kohonen_smoothness"]
-                                total_loss += self.settings.training.smoothness_weight * smoothness_loss
+                            # Add smoothness loss
+                            smoothness_loss = aux_losses["kohonen_smoothness"]
+                            total_loss += self.settings.training.smoothness_weight * smoothness_loss
 
-                                # Add quantization losses
-                                local_quantization_loss = aux_losses["local_quantization"]
-                                total_loss += self.model.config.local_quantization_weight * aux_losses["local_quantization"]
+                            # Add quantization losses
+                            local_quantization_loss = aux_losses["local_quantization"]
+                            total_loss += self.model.config.local_quantization_weight * aux_losses["local_quantization"]
 
-                                global_quantization_loss = aux_losses["global_quantization"]
-                                total_loss += self.model.config.global_quantization_weight * aux_losses["global_quantization"]
+                            global_quantization_loss = aux_losses["global_quantization"]
+                            total_loss += self.model.config.global_quantization_weight * aux_losses["global_quantization"]
 
-                                # Add reconstruction loss
-                                total_loss += self.model.config.reconstruction_weight * aux_losses["reconstruction"]
+                            # Add reconstruction loss
+                            total_loss += self.model.config.reconstruction_weight * aux_losses["reconstruction"]
 
-                            total_loss = total_loss / self.settings.training.gradient_accumulation_steps
-
-                        if self.scaler is not None:
-                            self.scaler.scale(total_loss).backward()
-                        else:
-                            total_loss.backward()
-
-                    if self.settings.optimizer.grad_clip != 0.0:
-                        if self.scaler is not None:
-                            self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.settings.optimizer.grad_clip)
+                        total_loss = total_loss / self.settings.training.gradient_accumulation_steps
 
                     if self.scaler is not None:
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
+                        self.scaler.scale(total_loss).backward()
                     else:
-                        self.optimizer.step()
+                        total_loss.backward()
 
-                    self.optimizer.zero_grad(set_to_none=True)
+                if self.settings.optimizer.grad_clip != 0.0:
+                    if self.scaler is not None:
+                        self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.settings.optimizer.grad_clip)
 
-                    # Update scheduler if it exists
-                    if self.scheduler is not None:
-                        self.scheduler.step()
+                if self.scaler is not None:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
 
-                    # Timing and logging
-                    t1 = time.time()
-                    dt = t1 - t0
-                    t0 = t1
+                self.optimizer.zero_grad(set_to_none=True)
 
-                    metrics = None
+                # Update scheduler if it exists
+                if self.scheduler is not None:
+                    self.scheduler.step()
 
-                    if self.iter_num % self.settings.training.log_interval == 0 and self.master_process:
-                        memory_stats = self.get_memory_usage()
-                        memory_metrics = {f"system/{k}": v for k, v in memory_stats.items()}
+                # Timing and logging
+                t1 = time.time()
+                dt = t1 - t0
+                t0 = t1
 
-                        gpu_stats = self.log_gpu_stats()
-                        gpu_metrics = {f"system/{k}": v for k, v in gpu_stats.items()}
+                metrics = None
 
-                        # Garbage collection if memory usage is high
-                        if self.settings.system.clear_cache and memory_stats.get("cuda_used_gb", 0) > 0.9 * torch.cuda.get_device_properties(self.device).total_memory:
-                            gc.collect()
-                            torch.cuda.empty_cache()
+                if self.iter_num % self.settings.training.log_interval == 0 and self.master_process:
+                    memory_stats = self.get_memory_usage()
+                    memory_metrics = {f"system/{k}": v for k, v in memory_stats.items()}
 
-                        lossf = total_loss.item() * self.settings.training.gradient_accumulation_steps
+                    gpu_stats = self.log_gpu_stats()
+                    gpu_metrics = {f"system/{k}": v for k, v in gpu_stats.items()}
 
-                        # Log training metrics
-                        metrics = {
-                            "train/iter": self.iter_num,
-                            "train/batch_loss": lossf,
-                            "train/batch_time_ms": dt * 1000,
-                            "train/consistency_loss": consistency_loss.item() if self.model.config.use_kohonen else 0.0,
-                            "train/smoothness_loss": smoothness_loss.item() if self.model.config.use_kohonen else 0.0,
-                            "train/local_quantization_loss": local_quantization_loss.item() if self.model.config.use_kohonen else 0.0,
-                            "train/global_quantization_loss": global_quantization_loss.item() if self.model.config.use_kohonen else 0.0,
-                            "optimizer/learning_rate": lr,
-                            **memory_metrics,
-                            **gpu_metrics,
+                    # Garbage collection if memory usage is high
+                    if self.settings.system.clear_cache and memory_stats.get("cuda_used_gb", 0) > 0.9 * torch.cuda.get_device_properties(self.device).total_memory:
+                        gc.collect()
+                        torch.cuda.empty_cache()
+
+                    lossf = total_loss.item() * self.settings.training.gradient_accumulation_steps
+
+                    # Base metrics that are always included
+                    metrics = {
+                        "train/iter": self.iter_num,
+                        "train/batch_loss": lossf,
+                        "train/batch_time_ms": dt * 1000,
+                        "optimizer/learning_rate": lr,
+                        **memory_metrics,
+                        **gpu_metrics,
+                    }
+
+                    # Add Kohonen-specific metrics only when enabled
+                    if self.model.config.use_kohonen:
+                        kohonen_metrics = {
+                            "train/consistency_loss": consistency_loss.item(),
+                            "train/smoothness_loss": smoothness_loss.item(),
+                            "train/local_quantization_loss": local_quantization_loss.item(),
+                            "train/global_quantization_loss": global_quantization_loss.item(),
                         }
+                        metrics.update(kohonen_metrics)
 
-                        self.log_metrics(metrics)
+                    self.log_metrics(metrics)
 
-                    if self.settings.model.use_nvit:
-                        self.normalize_matrices()
+                if self.settings.model.use_nvit:
+                    self.normalize_matrices()
 
-                    self.iter_num += 1
-                    local_iter_num += 1
+                self.iter_num += 1
+                local_iter_num += 1
 
-                    # Update progress bar if enabled
-                    if pbar is not None and self.master_process:
-                        pbar.update(1)
-                        postfix.update({"epoch": current_epoch})  # type: ignore
-                        if metrics:
-                            postfix.update(loss=f"{metrics['train/batch_loss']:.4f}", lr=f"{metrics['optimizer/learning_rate']:.4e}", time_ms=f"{dt*1000:.1f}")
-                            metrics = None
-                        pbar.set_postfix(ordered_dict=postfix)  # type: ignore
-                    elif self.master_process and self.iter_num % self.settings.training.log_interval == 0:
-                        # Log progress without tqdm
-                        self.logger.info(
-                            f"Iter: {self.iter_num}/{self.settings.training.max_iters} Loss: {total_loss.item():.4f} LR: {lr:.4e} Time: {dt*1000:.1f}ms",
-                        )
+                try:
+                    X, y = next(train_iterator)
+                except StopIteration:
+                    current_epoch += 1
+                    train_iterator = iter(self.train_loader)
+                    X, y = next(train_iterator)
 
-                current_epoch += 1
-
-            if self.ddp:
-                dist.barrier()
-                dist.destroy_process_group()
+                # Update progress bar if enabled
+                if pbar is not None and postfix is not None and self.master_process:
+                    pbar: tqdm
+                    postfix: dict[str, Any]
+                    pbar.update(1)
+                    postfix.update({"epoch": current_epoch})
+                    if metrics:
+                        postfix.update(loss=f"{metrics['train/batch_loss']:.4f}", lr=f"{metrics['optimizer/learning_rate']:.4e}", time_ms=f"{dt*1000:.1f}")
+                        metrics = None
+                    pbar.set_postfix(ordered_dict=postfix)  # type: ignore
+                elif self.master_process and self.iter_num % self.settings.training.log_interval == 0:
+                    # Log progress without tqdm
+                    self.logger.info(
+                        f"Iter: {self.iter_num}/{self.settings.training.max_iters} Loss: {total_loss.item():.4f} LR: {lr:.4e} Time: {dt*1000:.1f}ms",
+                    )
 
             # Close progress bar if it exists
             if pbar is not None:
