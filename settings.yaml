@@ -1,15 +1,15 @@
 training:
-  eval_interval: 1000
-  log_interval: 200
-  eval_iters: 200
+  eval_interval: 250
+  log_interval: 50
+  eval_iters: 100
   eval_only: false
   always_save_checkpoint: true
   init_from: "scratch"
   gradient_accumulation_steps: 1
   batch_size: 512
-  max_iters: 100000
+  max_iters: 10000
   time_limit_seconds: 86400
-  max_iters_per_launch: 100000
+  max_iters_per_launch: 10000
   early_stopping_patience: 10
   save_numbered_checkpoints: false
   consistency_weight: 0.1
@@ -19,7 +19,7 @@ optimizer:
   learning_rate: 0.001
   min_lr: 1e-5
   warmup_iters: 500
-  lr_decay_iters: 1000
+  lr_decay_iters: 1500
   decay_lr: true
   weight_decay: 0.1
   beta1: 0.9
@@ -60,8 +60,8 @@ model:
 system:
   device: "cuda"
   dtype: "bfloat16"
-  use_ddp: true
-  compile: true
+  use_ddp: false
+  compile: false
   backend: "nccl"
   log_level: "INFO"
   log_to_file: true

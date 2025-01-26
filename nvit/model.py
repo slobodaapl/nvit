@@ -65,20 +65,21 @@ class Block(nn.Module):
             self.rmsnorm_mlp = RMSNorm(config.n_embd)
 
         if config.use_nvit:
-            self.attn_alpha_init_value = torch.scalar_tensor(0.05, dtype=torch.float32)
-            self.attn_alpha_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
-            self.attn_alpha = torch.nn.Parameter(self.attn_alpha_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
+            # Register scalar values as buffers
+            self.register_buffer("attn_alpha_init_value", torch.tensor(0.05, dtype=torch.float32))
+            self.register_buffer("attn_alpha_init_scaling", torch.tensor(config.base_scale, dtype=torch.float32))
+            self.attn_alpha = nn.Parameter(self.attn_alpha_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
 
-            self.mlp_alpha_init_value = torch.scalar_tensor(0.05, dtype=torch.float32)
-            self.mlp_alpha_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
-            self.mlp_alpha = torch.nn.Parameter(self.mlp_alpha_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
+            self.register_buffer("mlp_alpha_init_value", torch.tensor(0.05, dtype=torch.float32))
+            self.register_buffer("mlp_alpha_init_scaling", torch.tensor(config.base_scale, dtype=torch.float32))
+            self.mlp_alpha = nn.Parameter(self.mlp_alpha_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
 
-            self.sqk_init_value = torch.scalar_tensor(1.0, dtype=torch.float32)
-            self.sqk_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
+            self.register_buffer("sqk_init_value", torch.tensor(1.0, dtype=torch.float32))
+            self.register_buffer("sqk_init_scaling", torch.tensor(config.base_scale, dtype=torch.float32))
             self.sqk = torch.nn.Parameter(self.sqk_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
 
-            self.suv_init_value = torch.scalar_tensor(1.0, dtype=torch.float32)
-            self.suv_init_scaling = torch.scalar_tensor(1.0, dtype=torch.float32)
+            self.register_buffer("suv_init_value", torch.tensor(1.0, dtype=torch.float32))
+            self.register_buffer("suv_init_scaling", torch.tensor(1.0, dtype=torch.float32))
             self.suv = torch.nn.Parameter(self.suv_init_scaling*torch.ones(2 * 4 * config.n_embd, dtype=torch.float32))
 
     def norm_skip(self, source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -206,14 +207,14 @@ class CrossAttentionBlock(nn.Module):
 
         # nViT specific parameters
         if config.use_nvit:
-            # Attention parameters
-            self.attn_alpha_init_value = torch.scalar_tensor(0.05, dtype=torch.float32)
-            self.attn_alpha_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
+            # Register scalar values as buffers instead of creating them directly
+            self.register_buffer("attn_alpha_init_value", torch.tensor(0.05, dtype=torch.float32))
+            self.register_buffer("attn_alpha_init_scaling", torch.tensor(config.base_scale, dtype=torch.float32))
             self.attn_alpha = nn.Parameter(self.attn_alpha_init_scaling * torch.ones(config.n_embd, dtype=torch.float32))
 
             # Scale parameters for Q, K
-            self.sqk_init_value = torch.scalar_tensor(1.0, dtype=torch.float32)
-            self.sqk_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
+            self.register_buffer("sqk_init_value", torch.tensor(1.0, dtype=torch.float32))
+            self.register_buffer("sqk_init_scaling", torch.tensor(config.base_scale, dtype=torch.float32))
             self.sqk = nn.Parameter(self.sqk_init_scaling * torch.ones(config.n_embd, dtype=torch.float32))
 
     def forward(self, local: torch.Tensor, global_: torch.Tensor) -> torch.Tensor:

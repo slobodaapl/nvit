@@ -162,7 +162,7 @@ class Trainer:
                 )
 
             # Then cleanup DDP if it was used
-            if self.ddp:
+            if self.ddp and self.settings.system.use_ddp:
                 try:
                     dist.barrier()
                     dist.destroy_process_group()
@@ -196,10 +196,14 @@ class Trainer:
 
     def setup_distributed(self) -> None:
         """Initialize distributed training settings"""
+        # Always set basic DDP attributes even if not using DDP
+        self.ddp_rank = int(os.environ.get("RANK", "0"))
+        self.ddp_local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        self.ddp_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        self.master_process = self.ddp_rank == 0
+        self.seed_offset = self.ddp_rank
+
         if not self.ddp or not self.settings.system.use_ddp:
-            self.master_process = True
-            self.seed_offset = 0
-            self.ddp_world_size = 1
             self.device = self.settings.system.device
             return
 
@@ -207,10 +211,6 @@ class Trainer:
             # Add debug logging
             self.logger.info("Initializing distributed training...")
             self.logger.info(f"Environment variables: RANK={os.environ.get('RANK')}, LOCAL_RANK={os.environ.get('LOCAL_RANK')}, WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
-
-            self.ddp_rank = int(os.environ["RANK"])
-            self.ddp_local_rank = int(os.environ["LOCAL_RANK"])
-            self.ddp_world_size = int(os.environ["WORLD_SIZE"])
 
             # Set device before init_process_group
             self.device = f"cuda:{self.ddp_local_rank}"
@@ -220,12 +220,9 @@ class Trainer:
             dist.init_process_group(
                 backend=self.settings.system.backend,
                 init_method="env://",
-                device_id=torch.device("cuda",self.ddp_local_rank),
+                device_id=torch.device("cuda", self.ddp_local_rank),
                 timeout=timedelta(minutes=30),
             )
-
-            self.master_process = self.ddp_rank == 0
-            self.seed_offset = self.ddp_rank
 
             # Wait for all processes to reach this point
             dist.barrier(device_ids=list(range(self.ddp_world_size)))
@@ -341,9 +338,17 @@ class Trainer:
                     else:
                         train_transform_list.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10))
 
-            # Add final transforms
-            train_transform_list.extend([transforms.ToTensor(), normalize])
-            val_transform_list.extend([transforms.ToTensor(), normalize])
+            # Add prefetch to transforms for faster data loading
+            train_transform_list.append(transforms.ToTensor())
+            val_transform_list.append(transforms.ToTensor())
+            
+            # Move normalization to GPU for faster processing
+            if self.settings.system.device != "cpu":
+                train_transform_list.append(lambda x: x)  # Placeholder for GPU normalization
+                val_transform_list.append(lambda x: x)    # Placeholder for GPU normalization
+            else:
+                train_transform_list.append(normalize)
+                val_transform_list.append(normalize)
 
             # Create transform compositions
             train_transform = transforms.Compose(train_transform_list)
@@ -386,23 +391,23 @@ class Trainer:
             train_sampler = (
                 DistributedSampler(
                     trainset,
-                    num_replicas=self.ddp_world_size if self.ddp else 1,
-                    rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
+                    num_replicas=self.ddp_world_size if self.ddp and self.settings.system.use_ddp else 1,
+                    rank=self.ddp_rank if self.ddp and self.settings.system.use_ddp else 0,
                     shuffle=True,
                     seed=self.settings.training.seed if hasattr(self.settings.training, "seed") else 42,
                 )
-                if self.ddp
+                if self.ddp and self.settings.system.use_ddp
                 else None
             )
 
             val_sampler = (
                 DistributedSampler(
                     valset,
-                    num_replicas=self.ddp_world_size if self.ddp else 1,
-                    rank=self.ddp_rank if self.ddp and not self.settings.system.use_ddp else 0,
+                    num_replicas=self.ddp_world_size if self.ddp and self.settings.system.use_ddp else 1,
+                    rank=self.ddp_rank if self.ddp and self.settings.system.use_ddp else 0,
                     shuffle=False,
                 )
-                if self.ddp and not self.settings.system.use_ddp
+                if self.ddp and self.settings.system.use_ddp
                 else None
             )
 
@@ -410,20 +415,26 @@ class Trainer:
             train_loader = DataLoader(
                 trainset,
                 batch_size=self.settings.training.batch_size,
-                shuffle=(train_sampler is None),  # Don't shuffle if using sampler
+                shuffle=(train_sampler is None),
                 sampler=train_sampler,
                 num_workers=self.settings.data.num_workers,
-                pin_memory=True if self.settings.system.device == "cuda" else False,
-                drop_last=True,  # Recommended for DDP to avoid uneven batch sizes
+                pin_memory=True,
+                pin_memory_device=self.device if self.settings.system.device != "cpu" else "",
+                persistent_workers=True,  # Keep workers alive between epochs
+                prefetch_factor=2,        # Prefetch next batches
+                drop_last=True,
             )
 
             val_loader = DataLoader(
                 valset,
                 batch_size=self.settings.training.batch_size,
-                shuffle=False,  # Don't shuffle validation
+                shuffle=False,
                 sampler=val_sampler,
                 num_workers=self.settings.data.num_workers,
-                pin_memory=True if self.settings.system.device == "cuda" else False,
+                pin_memory=True,
+                pin_memory_device=self.device if self.settings.system.device != "cpu" else "",
+                persistent_workers=True,
+                prefetch_factor=2,
                 drop_last=False,
             )
 
@@ -505,6 +516,7 @@ class Trainer:
                 raise ValueError(f"Invalid init_from value: {self.settings.training.init_from}")
 
             self.model.to(self.device)
+            self.logger.info(f"Model initialized on device {self.device}")
 
             # First wrap with DDP if using distributed training
             if self.ddp and self.settings.system.use_ddp:
@@ -522,9 +534,13 @@ class Trainer:
                 )
 
             # Then compile if enabled
-            if self.settings.system.compile:
+            if hasattr(torch, 'compile') and self.settings.system.compile:
                 self.logger.info("Compiling model with torch.compile()")
-                self.model = cast(ViT, torch.compile(self.model))
+                self.model = cast(ViT, torch.compile(
+                    self.model,
+                    mode='max-autotune',
+                    fullgraph=True,
+                ))
 
             # Set total steps for learning rate scheduling
             if hasattr(self.model, "total_steps"):
@@ -550,12 +566,25 @@ class Trainer:
 
         # Normalize transformer blocks
         for block in model_obj.transformer.h:
-            block.query.weight.data = self.justnorm(block.query.weight.data, 1)
-            block.key.weight.data = self.justnorm(block.key.weight.data, 1)
-            block.value.weight.data = self.justnorm(block.value.weight.data, 1)
-            block.att_c_proj.weight.data = self.justnorm(block.att_c_proj.weight.data, 0)
-            block.c_fc.weight.data = self.justnorm(block.c_fc.weight.data, 1)
-            block.mlp_c_proj.weight.data = self.justnorm(block.mlp_c_proj.weight.data, 0)
+            # Create new normalized tensors instead of modifying in-place
+            query_norm = self.justnorm(block.query.weight.data.detach(), 1)
+            key_norm = self.justnorm(block.key.weight.data.detach(), 1)
+            value_norm = self.justnorm(block.value.weight.data.detach(), 1)
+            att_proj_norm = self.justnorm(block.att_c_proj.weight.data.detach(), 0)
+            fc_norm = self.justnorm(block.c_fc.weight.data.detach(), 1)
+            mlp_proj_norm = self.justnorm(block.mlp_c_proj.weight.data.detach(), 0)
+
+            # Use state_dict update to ensure DDP compatibility
+            block.query.weight.data = query_norm
+            block.key.weight.data = key_norm
+            block.value.weight.data = value_norm
+            block.att_c_proj.weight.data = att_proj_norm
+            block.c_fc.weight.data = fc_norm
+            block.mlp_c_proj.weight.data = mlp_proj_norm
+
+        # Ensure DDP is synchronized after normalization
+        if self.ddp and self.settings.system.use_ddp:
+            dist.barrier()
 
     @torch.no_grad()
     def estimate_loss(self) -> dict[str, float]:
@@ -919,7 +948,7 @@ class Trainer:
                 self.setup_wandb()
 
             # Add synchronization point before training
-            if self.ddp:
+            if self.ddp and self.settings.system.use_ddp:
                 self.logger.info("Waiting for all processes at barrier before training...")
                 dist.barrier()
                 self.logger.info("All processes synchronized, starting training...")
@@ -953,6 +982,13 @@ class Trainer:
             if self.iter_num == 0 and self.settings.training.eval_only:
                 self.evaluate()
 
+            # Move normalization to GPU
+            if self.settings.system.device != "cpu":
+                normalize = transforms.Normalize(
+                    mean=[0.5, 0.5, 0.5],
+                    std=[0.5, 0.5, 0.5],
+                ).to(self.device)
+
             # Calculate total epochs based on max_iters and dataset size
             current_epoch = math.floor(self.iter_num / len(self.train_loader))
             train_iterator = iter(self.train_loader)
@@ -965,7 +1001,7 @@ class Trainer:
                 and not self.finished
             ):
                 # Set epoch for distributed sampler
-                if self.ddp:
+                if self.ddp and self.settings.system.use_ddp:
                     self.train_loader.sampler.set_epoch(current_epoch)  # type: ignore[attr-defined]
 
                 # Set random seed for reproducibility
@@ -985,9 +1021,12 @@ class Trainer:
                     # Write statistics
                     self.write_statistics(self.iter_num, lr, losses)
 
-                if self.settings.system.device == "cuda":
-                    X = X.pin_memory().to(self.device, non_blocking=True)
-                    y = y.pin_memory().to(self.device, non_blocking=True)
+                # Efficient data transfer
+                if self.settings.system.device != "cpu":
+                    X = X.to(self.device, non_blocking=True)
+                    y = y.to(self.device, non_blocking=True)
+                    # Apply normalization on GPU
+                    X = normalize(X)
                 else:
                     X, y = X.to(self.device), y.to(self.device)
 
@@ -1048,9 +1087,14 @@ class Trainer:
                 if self.scheduler is not None:
                     self.scheduler.step()
 
-                # Apply nViT normalization after optimizer step
+                # Synchronize before normalization when using DDP
+                if self.ddp and self.settings.system.use_ddp:
+                    dist.barrier()
+
+                # Apply nViT normalization after all gradient operations
                 if self.settings.model.use_nvit:
-                    self.normalize_matrices()
+                    with self._model.no_sync() if isinstance(self._model, DDP) else nullcontext():
+                        self.normalize_matrices()
 
                 # Timing and logging
                 t1 = time.time()
@@ -1093,7 +1137,7 @@ class Trainer:
                         }
                         metrics.update(kohonen_metrics)
 
-                    self.log_metrics(metrics)
+                    self.log_metrics(metrics, self.iter_num)
 
                 self.iter_num += 1
                 local_iter_num += 1
