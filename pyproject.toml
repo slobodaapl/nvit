@@ -1,32 +1,37 @@
-[tool.poetry]
+[project]
 name = "nvit"
 version = "0.1.0"
 description = ""
-authors = ["slobodaapl <slobodaapl@gmail.com>"]
+authors = [{ name = "slobodaapl", email = "slobodaapl@gmail.com" }]
+requires-python = ">=3.8,<=3.11.9"
 readme = "README.md"
+dependencies = [
+    "ninja==1.*",
+    "packaging==24.*",
+    "kornia==0.*",
+#    "flash-attn==2.*",
+    "torch==2.*",
+    "torchvision==0.*",
+    "matplotlib==3.*",
+    "tqdm==4.*",
+    "psutil==6.*",
+    "einops==0.*",
+    "loguru==0.*",
+    "pydantic==2.*",
+    "dynaconf==3.*",
+    "wandb>=0.13.0,<1.0",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.8,<=3.11.9"
-ninja = "1.*"
-packaging = "24.*"
-kornia = "0.*"
-flash-attn = { version = "2.*", source = "pypi", allow-prereleases = true }
-torch = { version = "2.*", source = "pytorch-gpu" }
-torchvision = { version = "0.*", source = "pytorch-gpu" }
-matplotlib = "3.*"
-tqdm = "4.*"
-psutil = "6.*"
-einops = "0.*"
-loguru = "0.*"
-pydantic = "2.*"
-dynaconf = "3.*"
-wandb = ">=0.13.0,0.*"
+[tool.uv]
 
-[[tool.poetry.source]]
+[[tool.uv.index]]
 name = "pytorch-gpu"
 url = "https://download.pytorch.org/whl/cu124"
-priority = "explicit"
+
+[tool.uv.sources]
+torch = { index = "pytorch-gpu" }
+torchvision = { index = "pytorch-gpu" }
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling", "packaging", "ninja"]
+build-backend = "hatchling.build"

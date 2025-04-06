@@ -1,13 +1,15 @@
 import math
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from flash_attn import flash_attn_func
 from torch import nn
 
-from nvit.kohonen import KohonenMap
+
+if TYPE_CHECKING:
+    from flash_attn import flash_attn_func
 
 
 @dataclass
@@ -27,21 +29,68 @@ class ViTConfig:
     num_classes: int = 1000
     local_patch_size: int = 8  # Size of local patches
     global_patch_size: int = 16  # Size of global patches
-    kohonen_nodes: int = 512  # Total number of Kohonen nodes
-    kohonen_alpha: float = 0.01  # Learning rate for Kohonen maps
-    use_kohonen: bool = False
     reconstruction_weight: float = 0.1
     map_balance_weight: float = 0.5  # Learnable weight between local/global maps
-    kohonen_scheduler_enabled: bool = False
-    kohonen_scheduler_warmup_steps: int = 1000
-    kohonen_scheduler_decay_steps: int = 10000
-    kohonen_scheduler_min_lr: float = 0.001
     local_quantization_weight: float = 0.1
     global_quantization_weight: float = 0.1
 
 
 def justnorm(x: torch.Tensor) -> torch.Tensor:
         return x / x.norm(p=2, dim=-1, keepdim=True)
+
+
+class HSDyTNorm(nn.Module):
+    def __init__(self, hidden_size: int, init_alpha: float = 0.5, eps: float = 1e-8):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones(1) * init_alpha)
+        self.gamma = nn.Parameter(torch.ones(hidden_size))
+        self.beta = nn.Parameter(torch.zeros(hidden_size))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 1. RMSNorm calculation
+        input_dtype = x.dtype
+        x_float = x.float() # Use float32 for stability
+        rms = torch.mean(x_float * x_float, dim=-1, keepdim=True)
+        x_norm = x_float * torch.rsqrt(rms + self.eps)
+        # x_norm is now RMS normalized
+
+        # 2. Calculate L2 norm of the RMS-normalized vector
+        norm_l2 = torch.norm(x_norm, p=2, dim=-1, keepdim=True)
+
+        # 3. Calculate piecewise scaling factor g(||x_norm||)
+        mask_lt_1 = norm_l2 < 1.0
+        mask_ge_1 = ~mask_lt_1
+
+        scale_factor = torch.zeros_like(norm_l2)
+        # For ||x_norm|| < 1: g = 2 - ||x_norm||²
+        scale_factor[mask_lt_1] = 2.0 - norm_l2[mask_lt_1].pow(2)
+        # For ||x_norm|| >= 1: g = 1 / ||x_norm||
+        scale_factor[mask_ge_1] = 1.0 / (norm_l2[mask_ge_1] + self.eps) # Add eps for stability
+
+        # 4. Apply piecewise scaling
+        x_scaled = x_norm * scale_factor
+        x_scaled = x_scaled.to(dtype=input_dtype) # Cast back to original dtype
+
+        # 5. Apply original DyT transformation (scaled tanh + shift)
+        return self.gamma * torch.tanh(self.alpha * x_scaled) + self.beta
+    
+
+class CustomSwiGLU(nn.Module):
+    def __init__(self, in_features: int):
+        super().__init__()
+        
+        assert in_features % 2 == 0, "in_features must be even"
+        
+        self.in_features = in_features
+        self.linear1 = nn.Linear(in_features // 2, in_features // 2)
+        self.linear2 = nn.Linear(in_features // 2, in_features // 2)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x1, x2 = x.chunk(2, dim=-1)
+        x1 = self.linear1(x1)
+        x2 = self.linear2(x2)
+        return F.silu(x1) * x2
 
 
 class Block(nn.Module):
@@ -57,12 +106,12 @@ class Block(nn.Module):
 
         self.skip_param = nn.Parameter(torch.ones(1))
         self.c_fc = nn.Linear(config.n_embd, 2 * 4 * config.n_embd, bias=config.bias)
-        self.silu = nn.SiLU()
-        self.mlp_c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.swi_glu = CustomSwiGLU(4 * config.n_embd)
+        self.mlp_c_proj  = nn.Linear(2 * config.n_embd, config.n_embd, bias=config.bias)
 
         if config.use_nvit:
-            self.rmsnorm_att = RMSNorm(config.n_embd)
-            self.rmsnorm_mlp = RMSNorm(config.n_embd)
+            self.rmsnorm_att = HSDyTNorm(config.n_embd)
+            self.rmsnorm_mlp = HSDyTNorm(config.n_embd)
 
         if config.use_nvit:
             self.attn_alpha_init_value = torch.scalar_tensor(0.05, dtype=torch.float32)
@@ -80,6 +129,9 @@ class Block(nn.Module):
             self.suv_init_value = torch.scalar_tensor(1.0, dtype=torch.float32)
             self.suv_init_scaling = torch.scalar_tensor(1.0, dtype=torch.float32)
             self.suv = torch.nn.Parameter(self.suv_init_scaling*torch.ones(2 * 4 * config.n_embd, dtype=torch.float32))
+        
+        if self.config.flash_attn:
+            from flash_attn import flash_attn_func
 
     def norm_skip(self, source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         res = source * self.skip_param + target
@@ -150,8 +202,7 @@ class Block(nn.Module):
             suv = (self.suv * ((self.suv_init_value/self.suv_init_scaling) * (self.config.n_embd ** 0.5)))
             uv = suv * uv
 
-        u, v = torch.chunk(uv, 2, dim=-1)
-        x_mlp = u * self.silu(v)
+        x_mlp = self.swi_glu(uv)
         h_mlp = self.mlp_c_proj(x_mlp)
 
         if not self.config.use_nvit:
@@ -193,15 +244,15 @@ class CrossAttentionBlock(nn.Module):
 
         # Normalization layers
         if not config.use_nvit:
-            self.local_norm = RMSNorm(config.n_embd)
-            self.global_norm = RMSNorm(config.n_embd)
+            self.local_norm = HSDyTNorm(config.n_embd)
+            self.global_norm = HSDyTNorm(config.n_embd)
 
         # Attention layers
         self.q_local = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.k_global = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.v_global = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.proj = nn.Linear(config.n_embd, 2 * config.n_embd, bias=config.bias)
-        self.silu = nn.SiLU()
+        self.swi_glu = CustomSwiGLU(2 * config.n_embd)
         self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
         # nViT specific parameters
@@ -215,6 +266,9 @@ class CrossAttentionBlock(nn.Module):
             self.sqk_init_value = torch.scalar_tensor(1.0, dtype=torch.float32)
             self.sqk_init_scaling = torch.scalar_tensor(config.base_scale, dtype=torch.float32)
             self.sqk = nn.Parameter(self.sqk_init_scaling * torch.ones(config.n_embd, dtype=torch.float32))
+        
+        if self.config.flash_attn:
+            from flash_attn import flash_attn_func
 
     def forward(self, local: torch.Tensor, global_: torch.Tensor) -> torch.Tensor:
         # Apply normalization based on mode
@@ -254,11 +308,10 @@ class CrossAttentionBlock(nn.Module):
         else:
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, scale=softmax_scale, dropout_p=0.0, is_causal=False)
 
-        # Merge heads and project with SiLU gating
+        # Merge heads and project with custom swish gating
         out = rearrange(out, "b h t d -> b t (h d)")
         out = self.proj(out)
-        u, v = torch.chunk(out, 2, dim=-1)
-        out = u * self.silu(v)
+        out = self.swi_glu(out)
         out = self.out_proj(out)
 
         # Apply nViT learning rate and normalization
@@ -307,20 +360,6 @@ class ViT(nn.Module):
         n_local_patches = (config.image_size // config.local_patch_size) ** 2
         self.local_pos_embed = nn.Parameter(torch.zeros(1, n_local_patches, config.n_embd))
         self.global_pos_embed = nn.Parameter(torch.zeros(1, n_local_patches, config.n_embd))
-
-        # Kohonen maps
-        if config.use_kohonen:
-            self.local_kohonen = KohonenMap(
-                config.n_embd,
-                config.kohonen_nodes // 2,
-                config.kohonen_alpha if not config.kohonen_scheduler_enabled else config.kohonen_scheduler_min_lr,
-            )
-            self.global_kohonen = KohonenMap(
-                config.n_embd,
-                config.kohonen_nodes // 2,
-                config.kohonen_alpha if not config.kohonen_scheduler_enabled else config.kohonen_scheduler_min_lr,
-            )
-            self.map_balance = nn.Parameter(torch.tensor(config.map_balance_weight))
 
         # Cross attention for combining local and global features
         self.cross_attention = CrossAttentionBlock(config)
@@ -416,35 +455,7 @@ class ViT(nn.Module):
 
         aux_losses = {}
 
-        if self.config.use_kohonen:
-            # Apply Kohonen maps with current learning rate
-            lr = self.get_kohonen_lr(self.step)
-
-            # Process local and global features
-            local_repr, local_indices = self.local_kohonen(local_patches)
-            global_repr, global_indices = self.global_kohonen(global_patches)
-
-            # Update Kohonen nodes during training
-            if self.training:
-                self.local_kohonen.update_nodes(local_patches, local_indices, lr)
-                self.global_kohonen.update_nodes(global_patches, global_indices, lr)
-
-            # Combine local and global representations
-            local_patches_new = self.cross_attention(local_repr, local_patches)
-            global_patches_new = self.cross_attention(global_repr, global_patches)
-
-            # Compute additional losses
-            aux_losses["kohonen_consistency"] = self.compute_consistency_loss(local_repr, global_repr)
-            aux_losses["kohonen_smoothness"] = self.compute_smoothness_loss(local_indices, global_indices)
-
-            # Add quantization losses to ensure representations stay close to original patches
-            aux_losses["local_quantization"] = F.huber_loss(local_repr, local_patches)
-            aux_losses["global_quantization"] = F.huber_loss(global_repr, global_patches)
-
-            patches = self.cross_attention(local_patches_new, global_patches_new)
-        else:
-            # Without Kohonen maps, use cross attention directly
-            patches = self.cross_attention(local_patches, global_patches)
+        patches = self.cross_attention(local_patches, global_patches)
 
         # Apply transformer blocks
         for block in self.transformer.h:
@@ -488,94 +499,3 @@ class ViT(nn.Module):
         # Compute cosine similarity
         consistency = (local_norm * global_norm).sum(dim=-1)
         return 1.0 - consistency.mean()
-
-    def compute_smoothness_loss(self, local_indices: torch.Tensor, global_indices: torch.Tensor) -> torch.Tensor:
-        """Compute smoothness loss for map transitions"""
-        # Get neighboring indices
-        local_neighbors = self.get_neighbor_indices(local_indices)
-        global_neighbors = self.get_neighbor_indices(global_indices)
-
-        # Compute smoothness for both maps
-        local_smoothness = self.compute_map_smoothness(local_indices, local_neighbors, is_local=True)
-        global_smoothness = self.compute_map_smoothness(global_indices, global_neighbors, is_local=False)
-
-        return local_smoothness + global_smoothness
-
-    def get_neighbor_indices(self, indices: torch.Tensor) -> torch.Tensor:
-        """Get neighboring indices for each index in the Kohonen map"""
-        nodes_per_map = self.config.kohonen_nodes // 2
-        map_size = int(math.sqrt(nodes_per_map))
-
-        if map_size * map_size != nodes_per_map:
-            raise ValueError(
-                f"Number of nodes per map ({nodes_per_map}) must be a perfect square. "
-                f"Got {self.config.kohonen_nodes} total nodes.",
-            )
-
-        # Convert linear indices to 2D coordinates
-        row = (indices // map_size).unsqueeze(-1)  # Shape: (batch_size, num_indices, 1)
-        col = (indices % map_size).unsqueeze(-1)   # Shape: (batch_size, num_indices, 1)
-
-        # Get neighbor coordinates (8-neighborhood)
-        neighbor_offsets = torch.tensor([
-            [-1, -1], [-1, 0], [-1, 1],
-            [0, -1],           [0, 1],
-            [1, -1],  [1, 0],  [1, 1],
-        ], device=indices.device)  # Shape: (8, 2)
-
-        # Expand coordinates to match neighbor dimensions
-        row = row.expand(-1, -1, 8)  # Shape: (batch_size, num_indices, 8)
-        col = col.expand(-1, -1, 8)  # Shape: (batch_size, num_indices, 8)
-
-        # Add offsets to current coordinates
-        neighbor_rows = (row + neighbor_offsets[:, 0].view(1, 1, -1)) % map_size  # Shape: (batch_size, num_indices, 8)
-        neighbor_cols = (col + neighbor_offsets[:, 1].view(1, 1, -1)) % map_size  # Shape: (batch_size, num_indices, 8)
-
-        # Convert back to linear indices
-        neighbor_indices = neighbor_rows * map_size + neighbor_cols
-
-        return neighbor_indices
-
-    def compute_map_smoothness(self, indices: torch.Tensor, neighbor_indices: torch.Tensor, is_local: bool = True) -> torch.Tensor:
-        """Compute smoothness loss for a Kohonen map
-        Args:
-            indices: Tensor of shape (batch_size, num_indices) containing BMU indices
-            neighbor_indices: Tensor of shape (batch_size, num_indices, num_neighbors) containing neighbor indices
-            is_local: Whether to use local or global Kohonen map
-        Returns:
-            Scalar smoothness loss
-        """
-        # Use correct map
-        kohonen_map = self.local_kohonen if is_local else self.global_kohonen
-
-        # Get embeddings for current indices and their neighbors
-        current_embeddings = kohonen_map.nodes[indices]  # Shape: (batch_size, num_indices, embd_dim)
-        neighbor_embeddings = kohonen_map.nodes[neighbor_indices]  # Shape: (batch_size, num_indices, num_neighbors, embd_dim)
-
-        # Compute average distance to neighbors
-        distances = torch.norm(
-            current_embeddings.unsqueeze(2) - neighbor_embeddings,
-            p=2, dim=-1,
-        )
-
-        return distances.mean()
-
-    def get_kohonen_lr(self, step: int) -> float:
-        """Get current learning rate for Kohonen maps"""
-        if not self.config.kohonen_scheduler_enabled:
-            return self.config.kohonen_alpha
-
-        warmup_steps = self.config.kohonen_scheduler_warmup_steps
-        decay_steps = self.config.kohonen_scheduler_decay_steps
-        min_lr = self.config.kohonen_scheduler_min_lr
-        max_lr = self.config.kohonen_alpha
-
-        if step < warmup_steps:
-            # Linear warmup
-            return min_lr + (max_lr - min_lr) * (step / warmup_steps)
-        if step > decay_steps:
-            return min_lr
-        # Cosine decay
-        decay_ratio = (step - warmup_steps) / (decay_steps - warmup_steps)
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-        return min_lr + coeff * (max_lr - min_lr)

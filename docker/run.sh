@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Run docker container with local directory mounted and open shell
-docker run --rm -it \
+# Run podman container with local directory mounted and open shell
+podman run --rm -it \
     --gpus all \
     --shm-size=16gb \
     -v "$(pwd)":/app \

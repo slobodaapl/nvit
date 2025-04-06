@@ -171,7 +171,7 @@ class Trainer:
 
             # Finally cleanup wandb
             if wandb.run is not None:
-                wandb.finish()
+                wandb.run.finish()
 
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
@@ -550,12 +550,25 @@ class Trainer:
 
         # Normalize transformer blocks
         for block in model_obj.transformer.h:
-            block.query.weight.data = self.justnorm(block.query.weight.data, 1)
-            block.key.weight.data = self.justnorm(block.key.weight.data, 1)
-            block.value.weight.data = self.justnorm(block.value.weight.data, 1)
-            block.att_c_proj.weight.data = self.justnorm(block.att_c_proj.weight.data, 0)
-            block.c_fc.weight.data = self.justnorm(block.c_fc.weight.data, 1)
-            block.mlp_c_proj.weight.data = self.justnorm(block.mlp_c_proj.weight.data, 0)
+            # Create new normalized tensors instead of modifying in-place
+            query_norm = self.justnorm(block.query.weight.data.detach(), 1)
+            key_norm = self.justnorm(block.key.weight.data.detach(), 1)
+            value_norm = self.justnorm(block.value.weight.data.detach(), 1)
+            att_proj_norm = self.justnorm(block.att_c_proj.weight.data.detach(), 0)
+            fc_norm = self.justnorm(block.c_fc.weight.data.detach(), 1)
+            mlp_proj_norm = self.justnorm(block.mlp_c_proj.weight.data.detach(), 0)
+
+            # Use state_dict update to ensure DDP compatibility
+            block.query.weight.data = query_norm
+            block.key.weight.data = key_norm
+            block.value.weight.data = value_norm
+            block.att_c_proj.weight.data = att_proj_norm
+            block.c_fc.weight.data = fc_norm
+            block.mlp_c_proj.weight.data = mlp_proj_norm
+
+        # Ensure DDP is synchronized after normalization
+        if self.ddp and self.settings.system.use_ddp:
+            dist.barrier()
 
     @torch.no_grad()
     def estimate_loss(self) -> dict[str, float]:
@@ -907,6 +920,9 @@ class Trainer:
     def train(self) -> None:
         """Main training loop"""
         try:
+            # Enable anomaly detection temporarily
+            torch.autograd.set_detect_anomaly(True)
+            
             tlaunch = time.time()
 
             # Add debug logging for data loading
@@ -1048,9 +1064,14 @@ class Trainer:
                 if self.scheduler is not None:
                     self.scheduler.step()
 
-                # Apply nViT normalization after optimizer step
+                # Synchronize before normalization when using DDP
+                if self.ddp and self.settings.system.use_ddp:
+                    dist.barrier()
+
+                # Apply nViT normalization after all gradient operations
                 if self.settings.model.use_nvit:
-                    self.normalize_matrices()
+                    with self._model.no_sync() if isinstance(self._model, DDP) else nullcontext():
+                        self.normalize_matrices()
 
                 # Timing and logging
                 t1 = time.time()
