@@ -171,7 +171,7 @@ class Trainer:
 
             # Finally cleanup wandb
             if wandb.run is not None:
-                wandb.finish()
+                wandb.run.finish()
 
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
@@ -936,6 +936,9 @@ class Trainer:
     def train(self) -> None:
         """Main training loop"""
         try:
+            # Enable anomaly detection temporarily
+            torch.autograd.set_detect_anomaly(True)
+            
             tlaunch = time.time()
 
             # Add debug logging for data loading

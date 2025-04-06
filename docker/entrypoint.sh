@@ -2,8 +2,8 @@
 
 set -xeuo pipefail
 
-# Install the mounted project in editable mode, for both development and running
-pip install --upgrade --no-deps --user --root-user-action ignore -e .
+# Install the mounted project in editable mode
+uv sync
 
 # Execute passed command
 exec "$@"

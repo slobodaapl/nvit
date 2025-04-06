@@ -1,7 +1,7 @@
 # Default values
 param(
     [int]$num_gpus = 1,
-    [string]$visible_gpus = "all",
+    [string]$visible_gpus = "0",
     [switch]$detached = $false
 )
 
@@ -17,15 +17,15 @@ if (Test-Path .env) {
 New-Item -ItemType Directory -Force -Path "out" | Out-Null
 icacls "out" /grant Everyone:F /T
 
-# Build docker run command
-$docker_cmd = "docker run --rm"
+# Build podman run command
+$podman_cmd = "podman run --rm"
 if ($detached) {
-    $docker_cmd = "$docker_cmd -d"
+    $podman_cmd = "$podman_cmd -d"
 }
 
-# Run docker container with local directory mounted and execute training command
-Invoke-Expression "$docker_cmd ``
-    --gpus `"device=$visible_gpus`" ``
+# Run podman container with local directory mounted and execute training command
+Invoke-Expression "$podman_cmd ``
+    --device nvidia.com/gpu=$visible_gpus ``
     --shm-size=16gb ``
     -v ${PWD}:/app ``
     -w /app ``

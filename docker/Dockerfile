@@ -13,25 +13,10 @@ RUN apt-get update -y --no-install-recommends && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install poetry
-ENV PATH="/root/.local/bin:$PATH"
-RUN curl -sSL https://install.python-poetry.org | python3 -
-RUN poetry self add poetry-plugin-export
-RUN poetry config virtualenvs.create false
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="$HOME/.local/bin:$PATH"
 
-
-WORKDIR /setup
-
-# Export requirements without torch packages
-COPY pyproject.toml poetry.lock /setup/
-RUN poetry export --without-hashes -f requirements.txt --output requirements.txt && \
-    sed -i '/^torch/d' requirements.txt && \
-    sed -i '/^torchvision/d' requirements.txt
-
-# Install Python dependencies
-RUN pip install -r requirements.txt --no-cache-dir --no-build-isolation --upgrade
-
-# Set working directory
 WORKDIR /app
 
 # Copy and set entrypoint
@@ -40,4 +25,4 @@ RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
 # Default command
-CMD ["python", "-m", "nvit.train"]
+CMD ["uv", "run", "python", "-m", "nvit.train"]
